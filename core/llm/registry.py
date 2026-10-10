@@ -135,6 +135,32 @@ class LLMRegistry:
                 max_retries=config.llm.max_retries,
             )
 
+        spark_key = os.environ.get(config.llm.spark_api_key_env)
+        spark_url = os.environ.get(config.llm.spark_base_url_env) or config.llm.spark_base_url_default
+        if spark_key:
+            providers["spark"] = _OAIProvider(
+                api_key=spark_key,
+                base_url=spark_url,
+                timeout=config.llm.default_timeout_seconds,
+                max_retries=config.llm.max_retries,
+                provider_name="spark",
+            )
+
+        # 硅基流动（OpenAI 兼容协议）
+        siliconflow_key = os.environ.get(config.llm.siliconflow_api_key_env)
+        siliconflow_url = (
+            os.environ.get(config.llm.siliconflow_base_url_env)
+            or config.llm.siliconflow_base_url_default
+        )
+        if siliconflow_key:
+            providers["siliconflow"] = _OAIProvider(
+                api_key=siliconflow_key,
+                base_url=siliconflow_url,
+                timeout=config.llm.default_timeout_seconds,
+                max_retries=config.llm.max_retries,
+                provider_name="siliconflow",
+            )
+
         return cls(router=router, providers=providers)
 
     # ===== 统一调用接口 =====

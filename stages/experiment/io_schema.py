@@ -10,7 +10,7 @@
     → Claim 验证（用实验结果回填 Claim 证据）
 
 说明：Code Agent 调用 experiment_code_generate（DeepSeek，编程最强）；
-Advisor Agent 调用 experiment_code_review（MiniMax）。
+Advisor Agent 调用 experiment_code_review（配置的 LLM）。
 """
 from __future__ import annotations
 

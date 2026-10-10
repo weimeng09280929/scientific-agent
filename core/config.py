@@ -67,7 +67,7 @@ class ProjectPaths:
 class LLMConfig:
     """LLM 适配层配置。具体 provider 凭据从环境变量读取。
 
-    MiniMax / MiMo / DeepSeek 均兼容 OpenAI 协议，复用 OpenAIProvider，
+    MiniMax / MiMo / DeepSeek / SiliconFlow 均兼容 OpenAI 协议，复用 OpenAIProvider，
     通过不同的 base_url + api_key 区分。
     """
 
@@ -90,6 +90,16 @@ class LLMConfig:
     deepseek_api_key_env: str = "DEEPSEEK_API_KEY"
     deepseek_base_url_env: str = "DEEPSEEK_BASE_URL"
     deepseek_base_url_default: str = "https://api.deepseek.com/v1"
+
+    # 讯飞 Spark-X2-Flash（OpenAI 兼容 HTTP 接口）
+    spark_api_key_env: str = "SPARK_API_KEY"
+    spark_base_url_env: str = "SPARK_BASE_URL"
+    spark_base_url_default: str = "https://spark-api-open.xf-yun.com/agent/v1/"
+
+    # 硅基流动 SiliconFlow（OpenAI 兼容接口）
+    siliconflow_api_key_env: str = "SILICONFLOW_API_KEY"
+    siliconflow_base_url_env: str = "SILICONFLOW_BASE_URL"
+    siliconflow_base_url_default: str = "https://api.siliconflow.cn/v1"
 
     default_timeout_seconds: int = 120
     max_retries: int = 3

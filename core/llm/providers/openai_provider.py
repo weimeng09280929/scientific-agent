@@ -41,6 +41,7 @@ class OpenAIProvider(LLMProvider):
         base_url: Optional[str] = None,
         timeout: int = 120,
         max_retries: int = 3,
+        provider_name: str = "openai",
     ):
         try:
             from openai import OpenAI
@@ -56,6 +57,7 @@ class OpenAIProvider(LLMProvider):
             kwargs["base_url"] = base_url
         self._client = OpenAI(**kwargs)
         self._base_url = base_url
+        self.provider_name = provider_name
 
     def complete(self, request: LLMRequest, model: str) -> LLMResponse:
         messages = self._build_messages(request)
@@ -71,7 +73,7 @@ class OpenAIProvider(LLMProvider):
             raise LLMError(f"OpenAI complete 调用失败: {e}") from e
 
         text = resp.choices[0].message.content or ""
-        # 剥离推理模型（MiniMax-M3 等）拼进 content 的 <think> 思考链，只留最终答复
+        # 剥离推理模型（MiniMax-M3 / glm-5.3-flash 等）拼进 content 的 <think> 思考链，只留最终答复
         text = strip_think_tags(text)
         usage = resp.usage
         return LLMResponse(

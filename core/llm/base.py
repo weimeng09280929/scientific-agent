@@ -22,7 +22,7 @@ T = TypeVar("T", bound=BaseModel)
 def strip_think_tags(text: str) -> str:
     """剥离模型输出中的 ``<think>...</think>`` 推理块，只保留最终答复。
 
-    MiniMax-M3 等推理模型会把思考链（reasoning）一并拼进 ``content``，
+    MiniMax-M3 / glm-5.3-flash 等推理模型会把思考链（reasoning）一并拼进 ``content``，
     污染下游报告 / 文档。此函数：
     1. 反复移除非贪婪的 ``<think>...</think>`` 配对块（支持嵌套）；
     2. 移除残留的孤立 ``<think>`` / ``</think>`` 标签；

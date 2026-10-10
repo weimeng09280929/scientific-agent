@@ -4,14 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>科研 Agent 系统</title>
-    <link rel="stylesheet" href="static/style.css" />
+    <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-<script>
-    // 静态托管部署配置：后端 API 地址（Render 部署后填写实际 URL）
-    // 例如后端在 https://xxx.onrender.com，则 window.SRA_API_BASE = "https://xxx.onrender.com";
-    window.SRA_API_BASE = "";
-</script>
 <div class="app">
     <!-- 左侧导航 -->
     <aside class="sidebar">
@@ -37,30 +32,16 @@
             </div>
             <div class="nav-section">基本任务 · 文献调研</div>
             <div class="nav-item" data-page="research-report">
-                <span>调研报告（含研究缺口）</span>
+                <span>调研报告</span>
                 <span class="nav-badge muted" id="badge-report-gaps" style="display:none">0</span>
             </div>
             <div class="nav-item" data-page="papers">
                 <span>论文浏览</span>
                 <span class="nav-badge muted" id="badge-papers" style="display:none">0</span>
             </div>
-            <div class="nav-item" data-page="materials">
-                <span>材料知识</span>
-                <span class="nav-badge muted" id="badge-materials" style="display:none">0</span>
-            </div>
-            <div class="nav-section">路线 A · 构效关系发现</div>
-            <div class="nav-item" data-page="discovery">
-                <span>发现概览</span>
-                <span class="nav-badge muted" id="badge-discovery" style="display:none">0</span>
-            </div>
-            <div class="nav-item" data-page="discovery-detail">
-                <span>发现详情与可视化</span>
-            </div>
-            <div class="nav-item" data-page="materials-cv">
-                <span>Materials 交叉验证</span>
-            </div>
-            <div class="nav-item" data-page="method-alignment">
-                <span>方法↔代码对齐</span>
+            <div class="nav-item" data-page="gaps">
+                <span>研究缺口</span>
+                <span class="nav-badge muted" id="badge-gaps" style="display:none">0</span>
             </div>
             <div class="nav-section">产出物</div>
             <div class="nav-item" data-page="claims">
@@ -103,8 +84,8 @@
             <div class="sidebar-notes-list" id="sidebar-notes-list"></div>
         </div>
         <div class="sidebar-footer">
-            v0.1.0 · Dry-Run Demo
-            v0.2.0 · GOAI 赛道三·方向三
+            v1.0.2 · 2026-08-15
+            修复：发现报告下载 500 / Word·PDF 表格错位 / 引用链表格精简
         </div>
     </aside>
 
@@ -159,7 +140,7 @@
                 <div class="help-row"><kbd>3</kbd> - <span>研究进度</span></div>
                 <div class="help-row"><kbd>4</kbd> - <span>调研报告</span></div>
                 <div class="help-row"><kbd>5</kbd> - <span>论文浏览</span></div>
-                <div class="help-row"><kbd>6</kbd> - <span>发现概览</span></div>
+                <div class="help-row"><kbd>6</kbd> - <span>研究缺口</span></div>
                 <div class="help-row"><kbd>7</kbd> - <span>Claim 列表</span></div>
                 <div class="help-row"><kbd>8</kbd> - <span>实验列表</span></div>
                 <div class="help-row"><kbd>?</kbd> / <kbd>F1</kbd> - <span>打开本帮助</span></div>
@@ -188,6 +169,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="static/app.js"></script>
+<script src="/static/app.js"></script>
 </body>
 </html>

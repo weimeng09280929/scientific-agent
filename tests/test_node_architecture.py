@@ -64,6 +64,7 @@ EXPECTED_NODE_COUNTS = {
 
 # 初始输入 / 外部注入键：非任何节点产出，由入口或人工节点在确认时注入
 EXTERNAL_INPUT_KEYS = {
+    "project.domain",      # 项目所属领域（Pipeline / Web API 入口注入）
     "research.topic",       # 用户研究主题（入口注入）
     "research.search_prefs",  # 用户检索偏好（topic_confirm 人工节点注入）
 }

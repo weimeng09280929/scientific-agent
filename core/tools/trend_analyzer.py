@@ -131,7 +131,7 @@ def fetch_keyword_trends(
     通过 arXiv API 搜索论文，从标题和摘要中提取关键词，按年份统计频率。
 
     Args:
-        query: 检索关键词（如 "thermoelectric materials"）
+        query: 检索关键词（如 "thermoelectric materials"，由用户研究兴趣决定，不限学科）
         max_results: 最多获取论文数（默认 200）
         sort_by: 排序方式（submittedDate 可获取不同年份的论文）
 
@@ -303,37 +303,43 @@ def placeholder_trends(query: str) -> TrendData:
     """生成占位趋势数据（dry_run 模式用）。
 
     构造模拟的关键词频率数据，覆盖 3 年范围。
+    学科中性：占位数据不允许硬编码任何学科的高频术语（早期版本硬编码了
+    thermoelectric/perovskite 等材料学关键词，dry_run 或 arXiv 兜底时会把
+    LLM 的方向推荐整体带向材料学）。占位关键词一律从用户查询词派生，
+    加少量跨学科通用方法论词汇（machine learning / benchmark 等），保证
+    无论用户研究什么领域，占位数据都不会把推荐带向其他学科。
     """
     import random
 
-    base_keywords = [
-        "thermoelectric", "perovskite", "zt", "bi2te3", "seebeck",
-        "thermal", "conductivity", "electrical", "oxide", "alloy",
-        "nanostructure", "doping", "composite", "figure", "merit",
-        "band", "structure", "carrier", "scattering", "phonon",
-        "cspbbr3", "halide", "inorganic", "organic", "hybrid",
-        "machine", "learning", "discovery", "optimization", "screening",
+    # 从用户查询词派生领域关键词（学科中性：数据围绕用户自己的兴趣构造）
+    query_kws = [
+        kw for kw in extract_keywords(query)
+        if kw not in ("machine", "learning")  # 方法论词单独列出
+    ][:8]
+    # 跨学科通用方法论词汇（任何领域都可能出现，不构成学科倾向）
+    generic_kws = [
+        "machine", "learning", "benchmark", "optimization", "screening",
+        "simulation", "dataset", "evaluation",
     ]
 
     years = [2022, 2023, 2024, 2025]
     keyword_frequencies: dict[str, dict[int, int]] = {}
 
-    for kw in base_keywords:
+    all_kws = query_kws + generic_kws
+    for idx, kw in enumerate(all_kws):
         keyword_frequencies[kw] = {}
         base = random.randint(5, 30)
         for y in years:
-            # 模拟增长趋势
-            if kw in ("cspbbr3", "halide", "inorganic", "machine", "learning", "discovery", "screening"):
-                # 新兴方向：快速增长
+            # 模拟趋势：查询词 = 领域核心（稳定增长）；
+            # 后一半方法论词 = 新兴（快速增长），前一半 = 温和增长
+            if idx >= len(query_kws):
                 keyword_frequencies[kw][y] = int(base * (1 + 0.6 * (y - 2022)))
-            elif kw in ("bi2te3", "zt", "seebeck"):
-                # 稳定方向
+            elif idx % 2 == 0:
                 keyword_frequencies[kw][y] = int(base * (1 + 0.2 * (y - 2022)))
             else:
-                # 饱和方向
-                keyword_frequencies[kw][y] = max(1, int(base * (1 - 0.05 * (y - 2022))))
+                keyword_frequencies[kw][y] = max(1, int(base * (1 + 0.05 * (y - 2022))))
 
-    total_papers_by_year = {y: sum(keyword_frequencies[kw].get(y, 0) for kw in base_keywords) for y in years}
+    total_papers_by_year = {y: sum(keyword_frequencies[kw].get(y, 0) for kw in all_kws) for y in years}
 
     sample_papers = [
         {

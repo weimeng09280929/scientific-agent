@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS evidence_log (
 CREATE INDEX IF NOT EXISTS idx_evlog_paper ON evidence_log(paper_id);
 CREATE INDEX IF NOT EXISTS idx_evlog_source ON evidence_log(source);
 
--- Task 2：材料知识抽取（材料-性能-合成三元组）
+-- Task 2：领域知识抽取（研究对象-属性指标-方法条件三元组）
 -- 实体以 JSON 存 content，便于 Pydantic schema 演化（与 papers 等一致）
 CREATE TABLE IF NOT EXISTS materials (
     material_id TEXT PRIMARY KEY,
@@ -257,7 +257,8 @@ class KnowledgeStore:
                 md = p.metadata or {}
                 doc = (md.get("doc_id") or "").strip()
                 ax = (p.arxiv_id or "").strip()
-                if doc == key or ax == key:
+                doi = (p.doi or md.get("doi") or "").strip()
+                if doc == key or ax == key or doi.lower() == key.lower():
                     return p
         return None
 
@@ -559,10 +560,10 @@ class KnowledgeStore:
     def new_id() -> EntityId:
         return uuid.uuid4().hex
 
-    # ===== Task 2/3：材料知识与研究缺口 =====
+    # ===== Task 2/3：领域知识与研究缺口 =====
 
     def save_material(self, mat: Material) -> None:
-        """保存材料实体。"""
+        """保存抽取的领域对象实体（历史字段名 material 兼容保留）。"""
         with self._connect() as c:
             c.execute(
                 "INSERT OR REPLACE INTO materials (material_id, content, created_at) VALUES (?, ?, ?)",
@@ -707,7 +708,7 @@ class KnowledgeStore:
         }
 
     def material_stats(self) -> dict:
-        """统计材料知识库的三元组覆盖度。
+        """统计领域知识库的三元组覆盖度。
 
         Returns:
             dict 含 total_materials / total_properties / total_synthesis /

@@ -83,7 +83,7 @@ class PaperFetchOutput(NodeOutput):
     每条元数据是 dict，含 title/authors/year/abstract/arxiv_id/source_subquery 等字段。
     source_subquery 标记该候选来自哪个子问题的检索（便于后续交叉验证）。
 
-    evidence_chain 是审计轨迹（赛题证据链要求）：每条记录一次检索命中，
+    evidence_chain 是审计轨迹（证据链要求）：每条记录一次检索命中，
     含 subquery / source / title / external_id(doc_id|arxiv_id|s2_id) /
     offset / evidence_score / snippet，由 PaperIngestAgent 落库并关联 paper_id。
     """
@@ -150,7 +150,7 @@ class CrossValidateInput(NodeInput):
 class CrossValidateOutput(NodeOutput):
     """交叉验证输出：可信度报告。
 
-    report 结构（结构化版，赛题「Research Gap 识别质量」硬要求）：
+    report 结构（结构化版，「Research Gap 识别质量」硬要求）：
     {
         "conflicts": [
             {
@@ -195,13 +195,13 @@ class CrossValidateOutput(NodeOutput):
 # ===== MaterialKnowledgeExtractionAgent（Task 2：材料-性能-合成三元组）=====
 
 class MaterialExtractionInput(NodeInput):
-    """材料知识抽取输入：从入库论文摘要中抽取三元组。"""
+    """领域知识抽取输入：从入库论文摘要中抽取三元组。"""
 
     paper_ids: list[str]
 
 
 class MaterialExtractionOutput(NodeOutput):
-    """材料知识抽取输出：结构化材料知识（三元组）。
+    """领域知识抽取输出：结构化领域知识（三元组）。
 
     materials: [{name, formula, crystal_structure, space_group, lattice_parameters,
                  symmetry, composition, paper_id, paper_title, confidence,
@@ -224,7 +224,7 @@ class ResearchGapInput(NodeInput):
 
     双通道：
     - 通道 A（LLM）：cross_validate 报告（gaps/conflicts/consensus）+
-      论文摘要 + 材料知识 → 语义级识别矛盾/未探索/断链
+      论文摘要 + 领域知识 → 语义级识别矛盾/未探索/断链
     - 通道 B（数据驱动）：KnowledgeStore 材料库统计规则 →
       有性能无合成 / 材料体系零覆盖 / 孤立材料 / 性能类别稀疏
     """

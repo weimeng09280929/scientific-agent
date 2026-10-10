@@ -204,7 +204,7 @@ ctx.set(RESEARCH_PAPER_IDS, ids)  # 写
 `ctx.get` / `ctx.set` 调用与 `output_keys` 声明，构建生产者/消费者集合，断言：
 
 > **每个被消费的域键，要么有明确生产者（某个节点的 output_keys 或 ctx.set），
-> 要么属于入口注入白名单（`research.topic`、`research.search_prefs`）。**
+> 要么属于入口注入白名单（`project.domain`、`research.topic`、`research.search_prefs`）。**
 
 验证结果：**34 个被消费域键全部有生产者，无悬挂引用**；业务 Agent/Tool 的
 39 个产出键全局唯一，无覆盖冲突（人工节点对上游键的「修订」是有意设计，

@@ -53,6 +53,7 @@ from stages.common import (
     KNOWLEDGE_STORE,
     LLM_REGISTRY,
     PROJECT_DIR,
+    PROJECT_DOMAIN,
     PROJECT_ROOT,
     PROVENANCE_VALIDATOR,
     RESEARCH_CROSS_VALIDATION_REPORT,
@@ -117,13 +118,19 @@ class Pipeline:
     # ===== 项目初始化 =====
 
     def start_project(
-        self, project_id: str, topic: str
+        self,
+        project_id: str,
+        topic: str,
+        domain: str = "",
     ) -> tuple[ProjectSession, ExecutionContext]:
         """启动新项目，初始化 session 与 context，注入系统依赖。
 
         Args:
             project_id: 项目唯一 ID
             topic: 研究主题
+            domain: 研究领域（materials / biology / ai … 或自定义文本）。
+                    系统本身与领域无关，领域只影响各阶段 prompt 中的语义描述。
+                    留空时按通用领域处理（由研究主题自己决定语义）。
 
         Returns:
             (session, ctx) — 项目会话与执行上下文
@@ -157,16 +164,24 @@ class Pipeline:
         except Exception:  # noqa: BLE001
             logger.warning("保存主题到 KV 失败（project=%s）: 忽略", project_id)
 
+        # 设置研究领域（领域自适应：空值 = 通用领域）
+        ctx.set(PROJECT_DOMAIN, domain or "")
+        try:
+            store.save_kv("project.domain", domain or "")
+        except Exception:  # noqa: BLE001
+            logger.warning("保存领域到 KV 失败（project=%s）: 忽略", project_id)
+
         return session, ctx
 
     def resume_project(
-        self, project_id: str, topic: str = ""
+        self, project_id: str, topic: str = "", domain: str = ""
     ) -> tuple[ProjectSession, ExecutionContext]:
         """从已有项目恢复（用于中断后续跑）。
 
         Args:
             topic: 研究主题。ProjectSession 快照不持久化 topic，必须由调用方传入，
                    否则恢复后 RESEARCH_TOPIC 为空，检索阶段会拿到空主题。
+            domain: 研究领域。留空时从 KV 恢复上次保存的领域。
         """
         session = ProjectSession.load(project_id, self.paths)
         ctx = ExecutionContext(project_id=project_id)
@@ -188,6 +203,13 @@ class Pipeline:
                 store.save_kv("research.topic", topic)
             except Exception:  # noqa: BLE001
                 logger.warning("保存主题到 KV 失败（project=%s）: 忽略", project_id)
+        # 恢复研究领域：调用方未指定时从 KV 读上次保存值
+        if not domain:
+            try:
+                domain = store.get_kv("project.domain") or ""
+            except Exception:  # noqa: BLE001
+                domain = ""
+        ctx.set(PROJECT_DOMAIN, domain or "")
         return session, ctx
 
     def _restore_research_outputs(
@@ -198,7 +220,7 @@ class Pipeline:
         session 只持久化 stage_states，不持久化 ctx 域数据（paper_ids、
         cross_validation_report 等）。discovery 子图依赖这些产出，需手动恢复。
 
-        关键改动（赛题「Research Gap 识别质量」支持）：
+        关键改动（「Research Gap 识别质量」增强）：
         - KV cross_validation_report 恢复时做 schema 兼容：
           · gaps 元素若是 dict（结构化版）→ 完整保留 cited_paper_ids/chunks/type/actionability
           · gaps 元素若是 str（旧版字符串）→ 转结构化 dict（type=underexplored, actionability=medium）
@@ -494,6 +516,7 @@ class Pipeline:
         on_progress: Optional[Callable[[list[dict]], None]] = None,
         on_node_started: Optional[Callable[[str, list[str]], None]] = None,
         initial_ctx: Optional[dict] = None,
+        domain: str = "",
     ) -> PipelineResult:
         """运行全流程：research → ideation → design → experiment → writing(可选)。
 
@@ -518,22 +541,23 @@ class Pipeline:
             on_node_started: 节点级开始回调（每开始一个节点触发，参数为
                          当前节点 ID + 下一步候选节点列表）。
             initial_ctx: 启动时预置进 ctx 的键值（如用户检索偏好 search_prefs）。
+            domain: 研究领域（领域自适应，留空 = 通用领域）。
 
         Returns:
             PipelineResult
         """
         # 初始化或恢复
         if resume:
-            session, ctx = self.resume_project(project_id, topic)
-            session, ctx = self.resume_project(project_id)
+            session, ctx = self.resume_project(project_id, topic, domain)
             # resume 模式下 ctx 是全新的，需恢复 topic 与 research 阶段产出，
             # 否则下游阶段（ideation/design/...）读不到 paper_ids / cross_validation_report，
             # 导致 brainstorm 拿到空输入、生成与主题无关的占位思路（串主题根因）
             ctx.set(RESEARCH_TOPIC, topic)
+            ctx.set(PROJECT_DOMAIN, domain)
             if session.is_stage_done(LifecycleStage.RESEARCH):
                 self._restore_research_outputs(ctx, project_id, topic)
         else:
-            session, ctx = self.start_project(project_id, topic)
+            session, ctx = self.start_project(project_id, topic, domain)
 
         # 预置用户检索偏好等初始上下文（如有）
         if initial_ctx:
@@ -625,7 +649,7 @@ class Pipeline:
         result.summary = "全流程完成：调研→思路→方案→实验→写作"
         return result
 
-    # ===== 路线 A：构效关系发现 =====
+    # ===== 关系发现子流程 =====
 
     def run_discovery(
         self,
@@ -636,17 +660,17 @@ class Pipeline:
         on_progress: Optional[Callable[[list[dict]], None]] = None,
         on_node_started: Optional[Callable[[str, list[str]], None]] = None,
     ) -> PipelineResult:
-        """运行构效关系发现（路线 A）。
+        """运行关系发现子流程。
 
         流程：research 阶段（文献调研，产出 Research Gap + 论文）
               → discovery 子图（假设种子→搜索空间→LLM 引导搜索→验证→报告）
 
         discovery 不属于标准 5 阶段生命周期，作为 research 之后的可选扩展，
-        专用于材料科学构效关系发现。复用 research 阶段的产出（论文 + 交叉验证报告）。
+        面向各研究领域做关系发现。复用 research 阶段的产出（论文 + 交叉验证报告）。
 
         Args:
             project_id: 项目 ID
-            topic: 研究主题（如「热电材料的构效关系与性能优化」）
+            topic: 研究主题（如「某类研究对象的关系规律与性能优化」）
             human_callback: 人工节点回调
             resume: 是否从已有项目恢复（复用已完成的 research 阶段）
             on_progress: 节点级实时进度回调（每完成一个节点触发）
@@ -695,7 +719,6 @@ class Pipeline:
             on_node_recorded=on_progress,
             on_node_started=on_node_started,
         )
-        runner = GraphRunner(graph, ctx)
         ctx.current_stage = "discovery"
 
         if session.status_of(LifecycleStage.RESEARCH) == StageStatus.NOT_STARTED:
@@ -737,7 +760,7 @@ class Pipeline:
         result.status = "completed"
         result.current_stage = None
         result.summary = (
-            f"构效关系发现完成：{len(hypotheses)} 个假设 → "
+            f"关系发现完成：{len(hypotheses)} 个假设 → "
             f"{len(candidates)} 个搜索候选 → {len(relationships)} 条验证发现"
             f"（{n_novel} 条 novel），报告 Artifact {report_id[:8] if report_id else '无'}"
         )
@@ -759,6 +782,7 @@ class Pipeline:
         on_recommendations: Optional[Callable[[list[dict]], None]] = None,
         on_progress: Optional[Callable[[list[dict]], None]] = None,
         on_node_started: Optional[Callable[[str, list[str]], None]] = None,
+        domain: str = "",
     ) -> PipelineResult:
         """运行方向推荐（topic_discovery 子图）。
 
@@ -782,19 +806,22 @@ class Pipeline:
             on_progress: 节点级实时进度回调（每完成一个节点触发，
                 参数为当前完整的节点历史列表），供 Web 层实时刷新进度
             on_node_started: 节点级开始回调（当前节点 + 下一步候选）
+            domain: 研究领域（领域自适应，留空 = 通用领域）
 
         Returns:
             PipelineResult，summary 含推荐与选择概览
         """
         if resume:
-            session, ctx = self.resume_project(project_id, interest)
+            session, ctx = self.resume_project(project_id, interest, domain)
         else:
-            session, ctx = self.start_project(project_id, interest)
+            session, ctx = self.start_project(project_id, interest, domain)
 
         result = PipelineResult(project_id=project_id, status="running")
 
         # 设置研究兴趣
         ctx.set(TOPIC_DISCOVERY_INTEREST, interest)
+        # 设置研究领域（推荐主题时按该领域给出具体的研究对象与切入点）
+        ctx.set(PROJECT_DOMAIN, domain)
 
         # 运行 topic_discovery 子图
         from stages.topic_discovery.graph import build_topic_discovery_graph

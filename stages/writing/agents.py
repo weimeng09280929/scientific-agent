@@ -15,7 +15,7 @@ Claim/Experiment，再按章节填充内容，最后以审稿人视角校对。
 
 执行模式：
 - dry_run=True  ：用占位数据返回，不调用 LLM（默认，验证架构用）
-- dry_run=False ：真实调用 MiniMax M3，产出大纲/章节/审稿意见/最终论文 Artifact
+- dry_run=False ：真实调用配置的 LLM（glm-5.3-flash），产出大纲/章节/审稿意见/最终论文 Artifact
 """
 from __future__ import annotations
 

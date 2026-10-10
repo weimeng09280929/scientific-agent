@@ -12,7 +12,7 @@
 
 执行模式：
 - dry_run=True  ：用占位数据返回，不调用 LLM、不真实运行代码
-- dry_run=False ：真实调用 MiniMax M3，真实运行实验代码，真实更新 Claim 状态
+- dry_run=False ：真实调用配置的 LLM（glm-5.3-flash），真实运行实验代码，真实更新 Claim 状态
 """
 from __future__ import annotations
 
@@ -330,7 +330,7 @@ class CodeGenerateAgent(AgentNode):
                 ) or "(无实验配置)"
 
                 # 代码生成用 complete 而非 structured_output：
-                # MiniMax M3 在代码生成场景倾向返回纯代码/markdown 代码块，
+                # 推理模型在代码生成场景倾向返回纯代码/markdown 代码块，
                 # 强制 json_object 反而触发 JSON 解析失败。complete + 代码块提取更稳。
                 resp = registry.complete(
                     task_type=self.task_type,

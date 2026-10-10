@@ -32,6 +32,12 @@ PROJECT_ROOT = ContextKey[object]("system.project_root")
 PROJECT_DIR = ContextKey[object]("system.project_dir")
 
 
+# ===== 项目级全局键 =====
+# 研究领域（如 materials / biology / ai / 自定义文本）。
+# 系统本身与领域无关：领域只决定各阶段 prompt 中「抽取什么对象、
+# 关注什么指标、记录什么方法」的语义，由 core.knowledge.domain_profile 解析。
+PROJECT_DOMAIN = ContextKey[str]("project.domain")
+
 # ===== research 阶段域键 =====
 RESEARCH_TOPIC = ContextKey[str]("research.topic")
 RESEARCH_KEYWORDS = ContextKey[list[str]]("research.keywords")
@@ -51,7 +57,7 @@ RESEARCH_PAPER_IDS = ContextKey[list[str]]("research.paper_ids")
 RESEARCH_EVIDENCE_CHAIN = ContextKey[list[dict]]("research.evidence_chain")
 # 交叉验证报告（借鉴 GPT-Researcher）：多源冲突时的可信度评分与处置
 RESEARCH_CROSS_VALIDATION_REPORT = ContextKey[dict]("research.cross_validation_report")
-# 材料知识抽取（Task 2）：{materials: [...], properties: [...], synthesis: [...]}
+# 领域知识抽取（Task 2，历史字段名 materials/synthesis 兼容保留）：{materials: [...], properties: [...], synthesis: [...]}
 # 从入库论文摘要中抽取「材料-性能-合成」三元组，供 ideation/design 复用
 RESEARCH_MATERIAL_KNOWLEDGE = ContextKey[dict]("research.material_knowledge")
 # 研究缺口清单（Task 3）：[{gap_id, gap_type, statement, detail, evidence,
@@ -108,22 +114,24 @@ TOPIC_DISCOVERY_INTEREST = ContextKey[str]("topic_discovery.interest")
 TOPIC_DISCOVERY_TRENDS = ContextKey[dict]("topic_discovery.trends")
 # 趋势分析结果：{emerging: [...], stable: [...], saturated: [...], all_keywords: [...]}
 TOPIC_DISCOVERY_ANALYSIS = ContextKey[dict]("topic_discovery.analysis")
-# LLM 推荐的研究主题列表：[{topic, rationale, innovation_point, recommended_materials, trend_data}]
+# LLM 推荐的研究主题列表：[{topic, rationale, innovation_point, recommended_objects, trend_data}]
+# （recommended_objects 原名 recommended_materials，更名原因见 topic_discovery/agents.py 注释；
+#   旧数据兼容读取时前端同时识别两个字段名）
 TOPIC_DISCOVERY_RECOMMENDATIONS = ContextKey[list[dict]]("topic_discovery.recommendations")
 # 用户选择的推荐主题（写入 RESEARCH_TOPIC，接入原有 research 流程）
 TOPIC_DISCOVERY_SELECTED_TOPIC = ContextKey[str]("topic_discovery.selected_topic")
 
 
-# ===== discovery 阶段域键（路线 A：构效关系发现）=====
-# 候选构效关系假设（搜索种子）：[{hypothesis, variables, target_property, rationale, gap_ref}]
+# ===== discovery 阶段域键（关系发现子流程）=====
+# 候选关系假设（搜索种子）：[{hypothesis, variables, target_property, rationale, gap_ref}]
 DISCOVERY_HYPOTHESES = ContextKey[list[dict]]("discovery.hypotheses")
 # 搜索空间定义：{variables:[{name, range, unit, type}], target_property, constraints, literature_points:[...]}
 DISCOVERY_SEARCH_SPACE = ContextKey[dict]("discovery.search_space")
-# LLM 引导搜索产出的候选构效关系：[{config, predicted_property, plausibility, mechanism, novelty}]
+# LLM 引导搜索产出的候选关系：[{config, predicted_property, plausibility, mechanism, novelty}]
 DISCOVERY_CANDIDATES = ContextKey[list[dict]]("discovery.candidates")
-# 验证后的构效关系发现：[{relationship, evidence_refs, novelty, mechanism, confidence}]
+# 验证后的关系发现：[{relationship, evidence_refs, novelty, mechanism, confidence}]
 DISCOVERY_RELATIONSHIPS = ContextKey[list[dict]]("discovery.relationships")
-# 构效关系发现报告 Artifact ID
+# 关系发现报告 Artifact ID
 DISCOVERY_REPORT_ARTIFACT_ID = ContextKey[str]("discovery.report_artifact_id")
 
 

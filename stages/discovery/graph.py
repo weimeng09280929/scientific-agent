@@ -1,4 +1,4 @@
-"""discovery 阶段子图构建（路线 A：构效关系发现）。"""
+"""discovery 阶段子图构建（关系发现子流程）。"""
 from __future__ import annotations
 
 from core.orchestration.graph import Graph
@@ -14,10 +14,10 @@ from stages.discovery.agents import (
 
 
 def build_discovery_graph() -> Graph:
-    """构建构效关系发现阶段子图。
+    """构建关系发现阶段子图。
 
     拓扑（LLM 深度参与搜索过程）：
-        HypothesisSeedAgent（从 Research Gap 生成候选构效关系假设作为搜索种子）
+        HypothesisSeedAgent（从 Research Gap 生成候选关系假设作为搜索种子）
         → SearchSpaceAgent（定义搜索空间 + 从文献抽取数据点）
         → StageCheckpoint（搜索前快照，便于回滚）
         → LLMGuidedSearchAgent（核心创新：MCTS + LLM 融合）

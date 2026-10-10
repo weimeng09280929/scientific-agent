@@ -14,7 +14,7 @@
 
 执行模式：
 - dry_run=True  ：用占位数据返回，不调用 LLM（默认，验证架构用）
-- dry_run=False ：真实调用 MiniMax M3，真实入库 Claim/Artifact
+- dry_run=False ：真实调用配置的 LLM（glm-5.3-flash），真实入库 Claim/Artifact
 """
 from __future__ import annotations
 
@@ -168,7 +168,7 @@ class AtomDecomposeAgent(AgentNode):
                     system=(
                         f"研究主题：{topic}\n"
                         "你是科研方法设计助手。借鉴 AI-Researcher 的原子概念分解思想，"
-                        "把方法拆为 4-8 个最小可独立验证的原子概念（材料科学/多学科课题应包含："
+                        "把方法拆为 4-8 个最小可独立验证的原子概念（多学科课题应包含："
                         "问题定义、表征/特征构造、核心算子、约束或正则化、评估指标，"
                         "以及与 baseline 对比的验证原子概念），每个概念必须同时给出"
                         "数学公式（LaTeX）、代码实现骨架（Python stub）、明确的输入输出，"

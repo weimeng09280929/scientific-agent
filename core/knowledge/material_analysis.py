@@ -1094,7 +1094,7 @@ def decompose_target(props: list[MaterialProperty], target: str = "ZT") -> dict[
 
 
 # ========================================================================
-# 7. 材料画像聚合（build_profile）
+# 7. 对象画像聚合（build_profile）
 # ========================================================================
 
 def build_profile(

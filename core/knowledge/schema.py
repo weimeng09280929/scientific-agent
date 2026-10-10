@@ -45,9 +45,9 @@ class RelationType(str, Enum):
     ARTIFACT_CITES_CLAIM = "artifact_cites_claim"              # Artifact → Claim
     ARTIFACT_CITES_EXPERIMENT = "artifact_cites_experiment"    # Artifact → Experiment
     IDEA_RELATED_TO_IDEA = "idea_related_to_idea"              # Idea → Idea（关联思路）
-    # 材料知识（Task 2）：Material → Paper 来源
+    # 领域知识（Task 2）：Material（领域对象）→ Paper 来源
     MATERIAL_EXTRACTED_FROM_PAPER = "material_extracted_from_paper"  # Material → Paper
-    # 材料性能：Material → Property（via MaterialKnowledge）
+    # 对象属性：Material → Property（via MaterialKnowledge）
     MATERIAL_HAS_PROPERTY = "material_has_property"            # Material → MaterialProperty
     MATERIAL_HAS_SYNTHESIS = "material_has_synthesis"          # Material → MaterialSynthesis
 
@@ -293,12 +293,12 @@ class PropertyDataKind(str, Enum):
     INFERRED = "inferred"            # LLM 推断（非原始数据）
 
 
-# ===== 材料知识实体（Task 2：材料-性能-合成三元组）=====
+# ===== 领域知识实体（Task 2：研究对象-属性指标-方法条件三元组）=====
 
 class Material(BaseModel):
-    """材料实体：从论文中抽取的材料成分/结构。
+    """领域对象实体：从论文中抽取的研究对象成分/结构。
 
-    满足赛题「知识抽取」要求：材料成分（化学式、元素组成、掺杂比例）、
+    满足「知识抽取」要求：研究对象成分（化学式、元素组成、掺杂比例）、
     晶体结构（空间群、晶格参数、对称性）。
 
     深度分析扩展（多维材料性质画像的基础结构维度）：
@@ -446,7 +446,7 @@ class ResearchGap(BaseModel):
     由 cross_validate 的 gaps（子问题字符串列表）升级为结构化实体：
     - 类型：contradiction（矛盾结论）/ unexplored（未被探索方向）/
       missing_link（缺失知识连接）
-    - 每条 Gap 带证据链（可溯源 paper_id + snippet，满足赛题「文献溯源完整性」）
+    - 每条 Gap 带证据链（可溯源 paper_id + snippet，满足「文献溯源完整性」）
     - 可操作性评估与优先级排序，供下游 ideation/discovery/报告消费
     """
 
@@ -574,7 +574,7 @@ class CandidateRanking(BaseModel):
 
 
 class SynthesisRouteCompare(BaseModel):
-    """合成路线对比条目。"""
+    """方法/路线对比条目（历史字段名 synthesis 兼容保留）。"""
 
     method: str = ""              # 方法名
     method_category: str = ""     # 工艺类别
@@ -603,9 +603,9 @@ class SynthesisParameterSensitivity(BaseModel):
 
 
 class MaterialProfile(BaseModel):
-    """材料性质画像：聚合一个材料的全部深度分析结果。
+    """领域对象画像：聚合一个研究对象的全部深度分析结果（历史字段名兼容保留）。
 
-    API /materials/{id}/profile 返回此结构，前端「材料画像页」消费。
+    API /materials/{id}/profile 返回此结构（历史兼容字段名）。
     """
 
     material_id: EntityId = ""
@@ -624,7 +624,7 @@ class MaterialProfile(BaseModel):
     comparison: dict[str, Any] = Field(default_factory=dict)
     # 候选排序（材料选择决策）
     ranking: list[dict[str, Any]] = Field(default_factory=list)
-    # 合成路线（对比 + 推荐 + 风险 + 可复现性）
+    # 方法/条件路线（对比 + 推荐 + 风险 + 可复现性）
     synthesis: dict[str, Any] = Field(default_factory=dict)
     # 性质—合成联合分析（工艺→结构→性质→性能链路）
     joint_analysis: dict[str, Any] = Field(default_factory=dict)

@@ -34,9 +34,9 @@ _load_env()
 
 
 def _set_global_seed() -> None:
-    """设置全局随机种子，保证构效关系搜索（MCTS 等）结果可复现。
+    """设置全局随机种子，保证搜索类节点（MCTS 等）结果可复现。
 
-    赛题复现审核要求：随机种子与复现说明。
+    复现要求：随机种子与复现说明。
     默认 seed=42，可用环境变量 SRA_SEED 覆盖。
     注意：LLM 输出本身有随机性，本种子保证算法内随机操作（节点扩展、
     tie-breaking、采样扰动等）在相同 LLM 输入下可复现。
@@ -127,11 +127,15 @@ from stages.common import RESEARCH_SEARCH_PREFS  # noqa: E402
 
 class CreateProjectRequest(BaseModel):
     topic: str
+    # 研究领域（领域自适应）：materials / chemistry / biology / medicine /
+    # ai / physics / energy，或任意自定义领域名称。留空 = 通用领域。
+    domain: str = ""
 
 
 class TopicDiscoveryRequest(BaseModel):
     """方向推荐请求。"""
     interest: str
+    domain: str = ""
 class RunProjectRequest(BaseModel):
     force_writing: bool = False
 
@@ -144,6 +148,7 @@ class HumanResponseRequest(BaseModel):
     action: str = "continue"  # continue / abort / rollback
     text: Optional[str] = None
     selected_option: Optional[str] = None
+    expected_node_id: Optional[str] = None
     # 检索偏好（可选）：年份区间 + 期刊关键词，在确认检索方向节点提交
     search_prefs: Optional[dict] = None
 
@@ -188,16 +193,15 @@ class HumanCallbackBridge:
             # 通知外部（工作线程）项目进入人工等待状态
             if on_pending is not None:
                 on_pending()
-            # 阻塞直到 REST 接口提交响应或超时
-            triggered = event.wait(timeout=3600)
-            # 收到响应/超时后恢复 running
+            # 仅用户明确提交才结束等待；长时间阅读/离开页面不等于中止。
+            event.wait()
             if on_resume is not None:
                 on_resume()
             with self._lock:
                 resp = self._responses.pop(project_id, None)
                 self._pending.pop(project_id, None)
                 self._events.pop(project_id, None)
-            if not triggered or resp is None:
+            if resp is None:
                 return HumanResponse(action="abort")
             return resp
 
@@ -235,6 +239,9 @@ class ProjectState:
     project_id: str
     topic: str
     created_at: str
+    # 研究领域（领域自适应）：决定各阶段 prompt 中「抽取什么对象 /
+    # 关注什么指标 / 记录什么方法」的语义，材料只是可选值之一
+    domain: str = ""
     status: str = "created"  # created / running / pending_human / completed / failed / aborted
     summary: str = ""
     last_result: Optional[PipelineResult] = None
@@ -248,12 +255,11 @@ class ProjectState:
     recommendation: str = ""
     # 方法改进建议（实验成败评估 advice，逐条可执行；experiment_failed 后展示）
     advice: list[dict] = field(default_factory=list)
-    # 路线 A：构效关系发现产出（从 discovery 子图 context 收集）
+    # 关系发现子流程产出（从 discovery 子图 context 收集，可选）
     discovery: dict = field(default_factory=dict)
     # 方向推荐产出（从 topic_discovery 子图收集）
     topic_discovery: dict = field(default_factory=dict)
     # 当前运行模式：pipeline / discovery / topic_discovery
-    # 当前运行模式：pipeline / discovery
     run_mode: str = ""
     # 用户检索偏好（论文抓取范围）：{year_min, year_max, venue_hint}
     search_prefs: dict = field(default_factory=dict)
@@ -300,7 +306,7 @@ def _scan_existing_projects() -> None:
 
     项目数据（knowledge.db / snapshots）持久化在 projects/ 目录，
     但 ProjectState 是进程内存单例，服务重启即丢失。此函数让重启后
-    旧项目仍可通过 Web 访问（论文/材料/证据等数据按 project_id 读取）。
+    旧项目仍可通过 Web 访问（论文/知识三元组/证据等数据按 project_id 读取）。
     topic 不持久化（ProjectSession 快照不含），恢复项目显示 topic 为空，
     重新运行前需在 UI 确认主题。
     """
@@ -327,19 +333,33 @@ def _scan_existing_projects() -> None:
             cur = session.current_stage().value
             done = [s for s in LifecycleStage.ordered()
                     if session.status_of(s).value in ("completed", "blocked", "failed")]
-            if done or cur != LifecycleStage.RESEARCH.value:
+            if all(session.status_of(s).value == "completed" for s in LifecycleStage.ordered()):
                 status = "completed"
-                summary = f"服务重启后自动恢复（最近阶段: {cur}）"
+                summary = "服务重启后恢复：全流程已完成"
+            elif done or cur != LifecycleStage.RESEARCH.value:
+                status = "stopped"
+                summary = f"服务曾重启，运行已中断；数据已保留（最近阶段: {cur}），可继续运行"
             else:
                 summary = "服务重启后自动恢复（数据可查看，重新运行需确认主题）"
         except Exception:
             status, summary = "created", "服务重启后自动恢复"
+        try:
+            persisted_discovery = KnowledgeStore(_CONFIG.paths.project_db(pid)).get_kv(
+                "web.topic_discovery", {}
+            ) or {}
+        except Exception:
+            persisted_discovery = {}
+        if persisted_discovery and status == "created":
+            status = "stopped"
+            summary = "服务曾重启，方向推荐已保留；可查看推荐并继续项目"
         _PROJECTS[pid] = ProjectState(
             project_id=pid,
-            topic=_recover_project_topic(pid),
+            topic=persisted_discovery.get("selected_topic") or _recover_project_topic(pid),
             created_at=created_at,
             status=status,
             summary=summary,
+            topic_discovery=persisted_discovery,
+            run_mode="pipeline" if persisted_discovery.get("selected_topic") else "",
         )
 
 
@@ -400,16 +420,13 @@ def _run_pipeline_thread(project_id: str, topic: str, resume: bool, force_writin
         pipeline = Pipeline(config=_CONFIG)
         # dry_run 模式下也使用桥接回调，让用户能介入；非 dry_run 同样使用桥接
         # 人工等待期间将 status 置为 pending_human，前端可明确感知
+        _progress_cbs = _make_progress_callback(state)
+        state.run_mode = "pipeline"
         human_cb = _BRIDGE.make_callback(
             project_id,
             on_pending=lambda: _set_state_status(state, "pending_human"),
             on_resume=lambda: _set_state_status(state, "running"),
         )
-        _progress_cbs = _make_progress_callback(state)
-        state.status = "running"
-        pipeline = Pipeline(config=_CONFIG)
-        # dry_run 模式下也使用桥接回调，让用户能介入；非 dry_run 同样使用桥接
-        human_cb = _BRIDGE.make_callback(project_id)
         result: PipelineResult = pipeline.run_pipeline(
             project_id=project_id,
             topic=topic,
@@ -419,6 +436,7 @@ def _run_pipeline_thread(project_id: str, topic: str, resume: bool, force_writin
             on_node_started=_progress_cbs[1],
             force_writing=force_writing,
             initial_ctx={RESEARCH_SEARCH_PREFS: state.search_prefs} if state.search_prefs else None,
+            domain=state.domain,
         )
         state.last_result = result
         state.status = result.status
@@ -434,100 +452,6 @@ def _run_pipeline_thread(project_id: str, topic: str, resume: bool, force_writin
         state.error = f"{type(e).__name__}: {e}"
         state.summary = f"Pipeline 执行异常: {e}"
 
-
-def _run_discovery_thread(project_id: str, topic: str, resume: bool) -> None:
-    """工作线程函数：执行构效关系发现（路线 A）并更新项目状态。"""
-    state = _PROJECTS.get(project_id)
-    if state is None:
-        return
-    try:
-        _set_state_status(state, "running")
-        state.run_mode = "discovery"
-        pipeline = Pipeline(config=_CONFIG)
-        human_cb = _BRIDGE.make_callback(
-            project_id,
-            on_pending=lambda: _set_state_status(state, "pending_human"),
-            on_resume=lambda: _set_state_status(state, "running"),
-        )
-        _progress_cbs = _make_progress_callback(state)
-        result: PipelineResult = pipeline.run_discovery(
-            project_id=project_id,
-            topic=topic,
-            human_callback=human_cb,
-            resume=resume,
-            on_progress=_progress_cbs[0],
-            on_node_started=_progress_cbs[1],
-        )
-        state.last_result = result
-        state.status = result.status
-        state.summary = result.summary
-        state.recommendation = result.recommendation
-        # 方法改进建议：从实验成败评估 outcome.advice 透传给前端展示
-        state.advice = (result.experiment_outcome or {}).get("advice", []) or []
-        state.node_history = result.node_history or []
-        state.current_node = None
-        state.next_nodes = []
-        # 从 node_history 提取 discovery 产出摘要（含假设列表，供 Web 排序展示）
-        state.discovery = _extract_discovery_summary(
-            result.node_history, result.extra.get("hypotheses") or []
-        )
-    except Exception as e:  # noqa: BLE001
-        state.status = "failed"
-        state.error = f"{type(e).__name__}: {e}"
-        state.summary = f"Discovery 执行异常: {e}"
-
-
-def _extract_discovery_summary(node_history: list[dict], hypotheses: list[dict] | None = None) -> dict:
-    """从节点历史提取 discovery 产出摘要。"""
-    summary = {"hypotheses": 0, "candidates": 0, "relationships": 0, "novel": 0, "nodes": []}
-    for h in node_history or []:
-        node_id = h.get("node_id", "")
-        if node_id in ("hypothesis_seed", "search_space", "cp_before_search", "llm_guided_search",
-                        "discovery_validate", "discovery_report"):
-            summary["nodes"].append({
-                "node_id": node_id,
-                "status": h.get("status"),
-                "summary": h.get("summary", ""),
-            })
-            if node_id == "hypothesis_seed" and "个候选构效关系假设" in h.get("summary", ""):
-                try:
-                    summary["hypotheses"] = int(h["summary"].split("生成")[1].split("个")[0])
-                except (IndexError, ValueError):
-                    pass
-            if node_id == "discovery_validate" and "条验证发现" in h.get("summary", ""):
-                try:
-                    summary["relationships"] = int(
-                        h["summary"].split("验证")[1].split("条")[0])
-                    if "条 novel" in h["summary"]:
-                        summary["novel"] = int(
-                            h["summary"].split("其中 ")[1].split(" 条")[0])
-                except (IndexError, ValueError):
-                    pass
-    # 假设列表（含三维可验证性评分），按综合分降序，供 Web 排序展示
-    h_list: list[dict] = []
-    for hyp in hypotheses or []:
-        if not isinstance(hyp, dict) or not hyp.get("hypothesis"):
-            continue
-        def _f(key: str) -> float:
-            try:
-                return float(hyp.get(key, 0.0))
-            except (TypeError, ValueError):
-                return 0.0
-        n_, f_, g_ = _f("novelty_score"), _f("feasibility_score"), _f("gap_relevance_score")
-        h_list.append({
-            "hypothesis": hyp.get("hypothesis", ""),
-            "variables": hyp.get("variables", []) or [],
-            "target_property": hyp.get("target_property", ""),
-            "rationale": hyp.get("rationale", ""),
-            "gap_ref": hyp.get("gap_ref", ""),
-            "novelty_score": round(n_, 2),
-            "feasibility_score": round(f_, 2),
-            "gap_relevance_score": round(g_, 2),
-            "overall_score": round(0.4 * n_ + 0.3 * f_ + 0.3 * g_, 2),
-        })
-    h_list.sort(key=lambda x: x["overall_score"], reverse=True)
-    summary["hypothesis_list"] = h_list
-    return summary
 
 
 def _run_topic_discovery_thread(project_id: str, interest: str, resume: bool) -> None:
@@ -552,6 +476,9 @@ def _run_topic_discovery_thread(project_id: str, interest: str, resume: bool) ->
                     "recommendations": recs,
                     "interest": interest,
                 }
+            KnowledgeStore(_CONFIG.paths.project_db(project_id)).save_kv(
+                "web.topic_discovery", state.topic_discovery
+            )
 
         _progress_cbs = _make_progress_callback(state)
         result: PipelineResult = pipeline.run_topic_discovery(
@@ -563,6 +490,7 @@ def _run_topic_discovery_thread(project_id: str, interest: str, resume: bool) ->
             on_recommendations=_publish_recommendations,
             on_progress=_progress_cbs[0],
             on_node_started=_progress_cbs[1],
+            domain=state.domain,
         )
         state.last_result = result
         state.status = result.status
@@ -572,7 +500,13 @@ def _run_topic_discovery_thread(project_id: str, interest: str, resume: bool) ->
         state.current_node = None
         state.next_nodes = []
         # 存储方向推荐完整数据（推荐列表 + 选择结果）
-        state.topic_discovery = result.extra or {}
+        # 失败/中止结果通常没有 extra；不可擦掉已发布的真实推荐。
+        if result.extra:
+            state.topic_discovery = {**state.topic_discovery, **result.extra}
+        if state.topic_discovery:
+            KnowledgeStore(_CONFIG.paths.project_db(project_id)).save_kv(
+                "web.topic_discovery", state.topic_discovery
+            )
         # 若用户已选定主题，自动把所选主题写入 state.topic，并启动 research pipeline
         selected = (result.extra or {}).get("selected_topic", "") or ""
         if result.status == "completed" and selected.strip():
@@ -671,10 +605,16 @@ def create_project(req: CreateProjectRequest) -> dict:
         project_id=project_id,
         topic=topic,
         created_at=datetime.utcnow().isoformat(),
+        domain=(req.domain or "").strip(),
     )
     with _LOCK:
         _PROJECTS[project_id] = state
-    return {"project_id": project_id, "topic": topic, "created_at": state.created_at}
+    return {
+        "project_id": project_id,
+        "topic": topic,
+        "created_at": state.created_at,
+        "domain": state.domain,
+    }
 
 
 @app.get("/api/projects")
@@ -688,6 +628,7 @@ def list_projects() -> dict:
                 "created_at": s.created_at,
                 "status": s.status,
                 "summary": s.summary,
+                "domain": s.domain,
             }
             for s in _PROJECTS.values()
         ]
@@ -732,7 +673,7 @@ def get_status(project_id: str) -> dict:
 
     # 产出物计数
     counts = {"papers": 0, "ideas": 0, "claims": 0, "experiments": 0, "evidence": 0,
-              "materials": 0, "properties": 0, "synthesis": 0, "gaps": 0}
+              "entities": 0, "properties": 0, "methods": 0, "gaps": 0}
     try:
         store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
         counts["papers"] = len(store.list_papers())
@@ -741,6 +682,8 @@ def get_status(project_id: str) -> dict:
         counts["experiments"] = len(store.list_experiments())
         counts["evidence"] = store.evidence_stats()["total"]
         mstats = store.material_stats()
+        counts["entities"] = mstats["total_materials"]
+        # 兼容字段：前端/下载模板沿用 materials 键名，语义为「研究对象」
         counts["materials"] = mstats["total_materials"]
         counts["properties"] = mstats["total_properties"]
         counts["synthesis"] = mstats["total_synthesis"]
@@ -753,8 +696,10 @@ def get_status(project_id: str) -> dict:
     return {
         "project_id": project_id,
         "topic": state.topic,
+        "domain": state.domain,
         "created_at": state.created_at,
         "status": state.status,
+        "run_mode": state.run_mode,
         "summary": state.summary,
         "recommendation": state.recommendation,
         "advice": state.advice,
@@ -808,121 +753,6 @@ def run_project(project_id: str, req: Optional[RunProjectRequest] = None) -> dic
     return {"project_id": project_id, "message": msg, "resumed": resume, "force_writing": force_writing}
 
 
-@app.post("/api/projects/{project_id}/run-discovery")
-def run_discovery(project_id: str) -> dict:
-    """启动构效关系发现（路线 A）：research → discovery 子图。
-
-    异步执行，立即返回。结果通过 /status 与 /discoveries 接口查询。
-    """
-    state = _require_project(project_id)
-    if state.status == "running":
-        raise HTTPException(status_code=409, detail="任务正在运行中")
-    if state.status == "pending_human":
-        raise HTTPException(
-            status_code=409,
-            detail="当前等待人工响应，请先提交 human-response 或中止",
-        )
-    if not state.topic.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="项目主题为空（服务重启后恢复的项目不持久化 topic），请重新创建项目或补充主题",
-        )
-    resume = state.status not in ("created",)
-    thread = threading.Thread(
-        target=_run_discovery_thread,
-        args=(project_id, state.topic, resume),
-        daemon=True,
-    )
-    state.thread = thread
-    state.error = None
-    thread.start()
-    return {"project_id": project_id, "message": "discovery 已启动", "resumed": resume}
-
-
-@app.get("/api/projects/{project_id}/discoveries")
-def get_discoveries(project_id: str) -> dict:
-    """获取构效关系发现产出（路线 A）。
-
-    返回内容包括：
-    - relationships：构效关系 Claim 列表
-    - discovery_summary：发现汇总（含 novel 计数）
-    - reliability_scores：客观可信度评分（5 维度 + 风险标签）
-    - expert_assistance：专家辅助包（最近邻工艺 + 类似材料 + DFT + 实验 protocol）
-    - gap_scores：上游 Research Gap 质量评分（4 维度 + 综合分）
-    - run_mode：运行模式
-    """
-    state = _require_project(project_id)
-    # 从 KnowledgeStore 读取 discovery 阶段产出的 Claim（构效关系发现）
-    relationships: list[dict] = []
-    reliability_scores: list[dict] = []
-    expert_assistances: list[dict] = []
-    gap_scores: list[dict] = []
-    gap_summary: dict = {}
-    rel_summary: dict = {}
-    try:
-        store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
-        # Claim
-        for c in store.list_claims():
-            if c.source_stage == "discovery":
-                relationships.append({
-                    "claim_id": c.claim_id,
-                    "statement": c.statement,
-                    "status": c.status.value,
-                    "evidence_refs": c.evidence_refs,
-                    "created_at": c.created_at.isoformat() if c.created_at else None,
-                })
-        # 客观可信度评分（路线 A 客观指标：5 维度）
-        rel_kv = store.get_kv("discovery_reliability_scores") or {}
-        reliability_scores = rel_kv.get("scores", []) if isinstance(rel_kv, dict) else []
-        rel_summary = rel_kv.get("summary", {}) if isinstance(rel_kv, dict) else {}
-        # 专家辅助包（让材料专家感到"对我有用"）
-        expert_assistances = store.get_kv("discovery_expert_assistance") or []
-        # 上游 Gap 质量评分
-        gap_kv = store.get_kv("research_gap_scores") or {}
-        gap_scores = gap_kv.get("scores", []) if isinstance(gap_kv, dict) else []
-        gap_summary = gap_kv.get("summary", {}) if isinstance(gap_kv, dict) else {}
-        # 兼容旧数据：评分里没有 statement/paper_titles 时，用 research_gaps 表回填
-        # （gap_id → statement + evidence 论文标题），保证前端始终可读
-        if gap_scores:
-            try:
-                gaps_in_store = store.list_research_gaps()
-                gap_meta = {
-                    g.gap_id: g for g in gaps_in_store
-                }
-                enriched = []
-                for s in gap_scores:
-                    if s.get("statement") or s.get("paper_titles"):
-                        enriched.append(s)
-                        continue
-                    s2 = dict(s)
-                    g = gap_meta.get(s.get("gap_id", ""))
-                    if g:
-                        s2["statement"] = g.statement or ""
-                        evs = g.evidence or []
-                        s2["evidence"] = evs
-                        s2["paper_titles"] = [
-                            e.get("title", "") for e in evs if e.get("title")
-                        ][:5]
-                        s2["paper_ids"] = [
-                            e.get("paper_id", "") for e in evs if e.get("paper_id")
-                        ][:5]
-                    enriched.append(s2)
-                gap_scores = enriched
-            except Exception:  # noqa: BLE001
-                pass
-    except Exception as e:  # noqa: BLE001
-        pass
-    return {
-        "project_id": project_id,
-        "discovery_summary": state.discovery,
-        "relationships": relationships,
-        "reliability_scores": reliability_scores,
-        "reliability_summary": rel_summary,
-        "expert_assistances": expert_assistances,
-        "gap_scores": gap_scores,
-        "gap_summary": gap_summary,
-        "run_mode": state.run_mode,
-    }
 
 
 @app.post("/api/projects/{project_id}/run-topic-discovery")
@@ -945,6 +775,8 @@ def run_topic_discovery(project_id: str, req: TopicDiscoveryRequest) -> dict:
             detail="当前等待人工响应，请先提交 human-response 或中止",
         )
     resume = state.status not in ("created",)
+    domain = (req.domain or "").strip() or state.domain
+    state.domain = domain  # 记录/更新研究领域
     thread = threading.Thread(
         target=_run_topic_discovery_thread,
         args=(project_id, interest, resume),
@@ -954,7 +786,7 @@ def run_topic_discovery(project_id: str, req: TopicDiscoveryRequest) -> dict:
     state.error = None
     state.topic = interest  # 更新 topic 为用户输入的研究兴趣
     thread.start()
-    return {"project_id": project_id, "message": "topic_discovery 已启动", "interest": interest}
+    return {"project_id": project_id, "message": "topic_discovery 已启动", "interest": interest, "domain": domain}
 
 
 @app.get("/api/projects/{project_id}/recommendations")
@@ -1046,15 +878,15 @@ def list_papers(project_id: str) -> dict:
 
 @app.get("/api/projects/{project_id}/materials")
 def list_materials(project_id: str) -> dict:
-    """获取材料知识库（Task 2：材料-性能-合成三元组）。
+    """获取领域知识库（Task 2：研究对象-评价指标-方法条件三元组）。
 
-    返回按材料聚合的知识：每种材料含其性能指标与合成方法，
-    均带来源论文与证据片段（可溯源）。满足赛题「知识抽取结构化」要求。
+    返回按研究对象聚合的知识：每个对象含其评价指标与方法条件，
+    均带来源论文与证据片段（可溯源）。满足「知识抽取结构化」要求。
 
     数据标准化（core/knowledge/normalize.py）：
     - 性能指标统一映射（ZT/zT/figure_of_merit → 热电优值，带标准符号/单位/类别）
     - 合成方法归类（固相法/熔融法/烧结法/计算模拟…）
-    - 材料体系分类（Bi₂Te₃ 基 / PbTe 基 / 钙钛矿 / 方钴矿…）
+    - 研究对象分类（按领域自动归类，如材料体系 / 细胞系 / 模型类别…）
     """
     from core.knowledge.normalize import (
         categorize_material,
@@ -1067,7 +899,7 @@ def list_materials(project_id: str) -> dict:
         store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
         materials = store.list_materials(limit=500)
         stats = store.material_stats()
-        # 聚合：材料 → 性能列表 + 合成列表
+        # 聚合：研究对象 → 评价指标列表 + 方法条件列表
         properties = store.list_material_properties()
         synthesis = store.list_material_synthesis()
         props_by_mat: dict[str, list[dict]] = {}
@@ -1168,14 +1000,14 @@ def list_materials(project_id: str) -> dict:
                 "properties": props,
                 "synthesis": syns,
             })
-        # ===== 材料间关联（会议纪要：给材料"牵线搭桥"）=====
+        # ===== 研究对象间关联（同体系 / 共指标 / 共方法 / 同论文）=====
         # 关联规则（任一命中即关联，附带关联类型与理由）：
-        #   1. same_system  ：材料类别相同（同体系，如同为铋碲系）
+        #   1. same_system  ：对象类别相同（同体系 / 同类别）
         #   2. same_property：报告了相同的归一化性能指标（如都测热电优值）
         #   3. same_method  ：合成方法类别相同（如都用固相法）
         #   4. same_paper   ：出自同一篇论文
         # 每条关联含 {material_id, name, formula, relation, reason}，
-        # 供前端材料卡片「关联材料」区块展示（点击跳转）。
+        # 供前端知识卡片「关联对象」区块展示（点击跳转）。
         mat_index: dict[str, dict] = {}
         for it in items:
             mat_index[it["material_id"]] = it
@@ -1228,70 +1060,6 @@ def list_materials(project_id: str) -> dict:
     }
 
 
-def _infer_target(props: list) -> str:
-    """从项目内性质数据推断研究目标性能（默认 ZT）。
-
-    统计 performance 维度性质（ZT/功率因子/转换效率）出现频率，取最高者；
-    无性能数据时默认 ZT（热电为项目主场景）。
-    """
-    from core.knowledge.normalize import normalize_property
-
-    counter: dict[str, int] = {}
-    for p in props:
-        norm = normalize_property(getattr(p, "property_name", ""), getattr(p, "property_name_cn", ""))
-        if norm.get("dimension") == "performance":
-            key = norm["key"]
-            counter[key] = counter.get(key, 0) + 1
-    if not counter:
-        return "ZT"
-    return max(counter, key=counter.get)
-
-
-@app.get("/api/projects/{project_id}/materials/{material_id}/profile")
-def get_material_profile(project_id: str, material_id: str) -> dict:
-    """获取材料深度分析画像（多维性质 → 机制 → 目标性能 → 对比 → 候选排序 → 合成路线）。
-
-    这是「材料选择 + 性质判断 + 合成方案设计 + 实验决策」的深度分析入口：
-    - 性质按六大维度分组（结构/电子/热/光/力/化学稳定性）
-    - 性质 → 机制 → 目标性能 关系解释（规则引擎 + LLM 增强）
-    - 目标性能因果拆解（如 ZT = S²σT/κ）
-    - 材料横向对比矩阵（单位统一 + 范围显示 + 证据等级）
-    - 材料候选排序（六维加权评分，可溯源）
-    - 合成路线对比 + 推荐 + 风险 + 可复现性评分
-
-    确定性规则引擎兜底，不编造数据；缺失值明确标记 missing。
-    """
-    from core.knowledge.material_analysis import build_profile
-    from core.knowledge.normalize import categorize_material
-
-    _require_project(project_id)
-    store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
-    mat = store.get_material(material_id)
-    if mat is None:
-        raise HTTPException(status_code=404, detail="材料不存在")
-
-    # 该材料的性质 + 合成
-    props = store.list_material_properties(material_id=material_id)
-    syns = store.list_material_synthesis(material_id=material_id)
-
-    # 全体材料（用于对比矩阵 + 候选排序）
-    all_materials = store.list_materials(limit=500)
-    all_props = store.list_material_properties()
-    all_syns = store.list_material_synthesis()
-    props_by_mat: dict[str, list] = {}
-    for p in all_props:
-        props_by_mat.setdefault(p.material_id, []).append(p)
-    syns_by_mat: dict[str, list] = {}
-    for s in all_syns:
-        syns_by_mat.setdefault(s.material_id, []).append(s)
-
-    target = _infer_target(all_props)
-    profile = build_profile(mat, props, syns, all_materials, props_by_mat, syns_by_mat, target)
-    profile["category"] = categorize_material(mat.name, mat.formula)
-    profile["target"] = target
-    return profile
-
-
 @app.get("/api/projects/{project_id}/gaps")
 def list_research_gaps(project_id: str) -> dict:
     """获取研究缺口清单（Task 3：Research Gap 识别）。
@@ -1299,7 +1067,7 @@ def list_research_gaps(project_id: str) -> dict:
     由 ResearchGapIdentifyAgent 在 cross_validate 之后生成并落库，
     每条 Gap 含类型（矛盾结论/未被探索方向/缺失知识连接）、
     证据链（可溯源 paper_id + snippet）、可操作性、优先级，
-    满足赛题「文献溯源完整性」要求，供前端「研究缺口」页展示。
+    满足「文献溯源完整性」要求，供前端「研究缺口」页展示。
     """
     _require_project(project_id)
     try:
@@ -1498,49 +1266,11 @@ def adjudicate_conflict(project_id: str, conflict_id: str, req: ConflictAdjudica
         raise HTTPException(status_code=500, detail=f"裁决保存失败: {e}") from e
 
 
-@app.post("/api/projects/{project_id}/materials/re-extract")
-def re_extract_materials(project_id: str) -> dict:
-    """覆盖度重抽：对「仅名称」材料（无性能无合成）做针对性二次抽取补全。
-
-    仅名称材料是首轮抽取的召回遗漏（材料名出现但未抽到性能/合成）。
-    本接口跨论文聚合包含材料名的摘要片段，专门 prompt 补全其性能与合成。
-    异步执行（调用 LLM，可能耗时数十秒~数分钟），立即返回任务受理。
-    """
-    state = _require_project(project_id)
-    if state.status == "running":
-        raise HTTPException(status_code=409, detail="pipeline 正在运行中")
-
-    def _worker() -> None:
-        try:
-            store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
-            from core.llm import LLMRegistry
-            from stages.research.agents import MaterialKnowledgeExtractionAgent
-            registry = LLMRegistry.from_config(_CONFIG)
-            agent = MaterialKnowledgeExtractionAgent("material_extraction")
-            n_added = agent._re_extract_name_only(store, registry)
-            mstats = store.material_stats()
-            state.error = None
-            state.summary = (
-                f"覆盖度重抽完成：补全 {n_added} 条知识"
-                f"（库内材料 {mstats['materials']} / 性能 {mstats['properties']} / "
-                f"合成 {mstats['synthesis']}）"
-            )
-        except Exception as e:  # noqa: BLE001
-            state.error = f"重抽失败: {type(e).__name__}: {e}"
-            state.summary = f"覆盖度重抽异常: {e}"
-
-    threading.Thread(target=_worker, daemon=True).start()
-    return {
-        "project_id": project_id,
-        "message": "覆盖度重抽已启动（异步执行），完成后可刷新材料页查看补全结果",
-    }
-
-
 @app.get("/api/projects/{project_id}/evidence")
 def list_evidence(project_id: str) -> dict:
     """获取检索证据链（审计轨迹：query → source → 命中 → paper 关联）。
 
-    赛题手册明确要求文献调研可溯源：Sciverse 调用记录天然构成证据链。
+    文献调研可溯源：Sciverse 调用记录天然构成证据链。
     每条记录：触发子问题、数据源、命中证据标题、外部 ID（doc_id/arxiv_id）、
     证据分、片段摘要，以及是否关联到已入库论文。
     """
@@ -1635,13 +1365,12 @@ def list_unlinked_papers(project_id: str) -> dict:
             p["reason_detail"] = (
                 f"与已入库论文《{dup_title[:60]}》重复，去重时合并"
             )
-        else:
-            src = p["source"]
-            scorer = "Sciverse 语义检索分" if src == "sciverse" else "LLM 相关性评估分"
+        elif p["source"] == "sciverse" and 0 < float(p["evidence_score"] or 0) < 0.5:
             p["reason"] = "score_rejected"
-            p["reason_detail"] = (
-                f"相关性打分 < 0.5（{scorer}），被 filter 阶段剔除"
-            )
+            p["reason_detail"] = "Sciverse 证据分低于 0.5，未进入论文库"
+        else:
+            p["reason"] = "unlinked_unknown"
+            p["reason_detail"] = "检索命中尚未关联论文；可能仍在筛选、被去重，或筛选未完成，不能断言相关度低"
 
     papers = sorted(
         seen.values(),
@@ -1658,6 +1387,25 @@ def list_unlinked_papers(project_id: str) -> dict:
             "低于 0.5 的候选保留在未入库列表，可人工复核后手动补录。"
         ),
     }
+
+
+def _paper_identifiers_from_evidence(source: str, external_id: str) -> tuple[str, str, str, str]:
+    """从可信来源类型的外部 ID 还原 DOI/arXiv 与原文、PDF 地址。"""
+    source = (source or "").lower()
+    raw = (external_id or "").strip()
+    doi = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", raw, flags=re.I) if source == "crossref" else ""
+    if doi and not re.fullmatch(r"10\.\d{4,9}/\S+", doi, flags=re.I):
+        doi = ""
+    arxiv_id = ""
+    if source == "arxiv":
+        arxiv_id = re.sub(r"^https?://(?:www\.)?arxiv\.org/(?:abs|pdf)/", "", raw, flags=re.I)
+        arxiv_id = re.sub(r"\.pdf$", "", arxiv_id, flags=re.I)
+        arxiv_id = re.sub(r"v\d+$", "", arxiv_id, flags=re.I)
+        if not re.fullmatch(r"(?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})", arxiv_id, flags=re.I):
+            arxiv_id = ""
+    url = f"https://arxiv.org/abs/{arxiv_id}" if arxiv_id else (f"https://doi.org/{doi}" if doi else "")
+    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf" if arxiv_id else ""
+    return doi, arxiv_id, url, pdf_url
 
 
 @app.post("/api/projects/{project_id}/papers/import")
@@ -1711,11 +1459,19 @@ def import_unlinked_paper(project_id: str, body: dict) -> dict:
     existing = None
     if (cand.get("external_id") or "").strip():
         existing = store.find_paper_by_external_id(cand["external_id"].strip())
+    if existing is None:
+        existing = next(
+            (p for p in store.list_papers()
+             if (p.title or "").strip().casefold() == (cand.get("title") or "").strip().casefold()),
+            None,
+        )
     if existing is not None:
         linked_count = 0
         for e in entries:
             eid = (e.get("external_id") or "").strip()
-            if external_id and eid and eid == external_id and e.get("log_id"):
+            etitle = (e.get("title") or "").strip().casefold()
+            if (eid and eid == (cand.get("external_id") or "").strip()
+                    or etitle and etitle == (cand.get("title") or "").strip().casefold()) and e.get("log_id"):
                 store.link_evidence_to_paper(e["log_id"], existing.paper_id)
                 linked_count += 1
         return {
@@ -1724,8 +1480,11 @@ def import_unlinked_paper(project_id: str, body: dict) -> dict:
             "message": f"该候选已存在同名论文，证据链已关联 {linked_count} 条到现有论文",
         }
 
-    # 新建论文（用证据链中的元数据）
+    # 新建论文（保留可核验外部标识，供原文跳转与 PDF 下载使用）
     paper_id = KnowledgeStore.new_id()
+    doi, arxiv_id, source_url, pdf_url = _paper_identifiers_from_evidence(
+        cand.get("source", ""), cand.get("external_id", "")
+    )
     snippet = body.get("snippet") or (cand.get("snippet") or "")
     # 清理前端渲染残留的 HTML 标签（手动补录时候选标题/片段可能带 <span class=highlight>）
     clean_title = re.sub(r"<[^>]+>", "", (cand.get("title") or title or "Untitled")).strip()
@@ -1735,10 +1494,15 @@ def import_unlinked_paper(project_id: str, body: dict) -> dict:
         paper_id=paper_id,
         title=clean_title,
         abstract=clean_snippet or None,
+        doi=doi or None,
+        arxiv_id=arxiv_id or None,
+        url=source_url or None,
         metadata={
             "source": cand.get("source", ""),
             "source_subquery": cand.get("subquery", ""),
             "doc_id": cand.get("external_id", ""),
+            "doi": doi,
+            "pdf_url": pdf_url,
             "evidence_score": cand.get("evidence_score", 0.0),
             "relevance_score": 0.0,
             "relevance_reason": "手动补录入库",
@@ -1834,8 +1598,9 @@ def download_paper_pdf(project_id: str, paper_id: str):
     pdf_url = (meta.get("pdf_url") or "").strip()
     if not pdf_url and paper.arxiv_id:
         pdf_url = f"https://arxiv.org/pdf/{paper.arxiv_id}.pdf"
-    if not pdf_url and paper.doi:
-        pdf_url = f"https://doi.org/{paper.doi}"
+    doi = paper.doi or meta.get("doi") or ""
+    if not pdf_url and doi:
+        pdf_url = f"https://doi.org/{doi}"
     if not pdf_url:
         # 最后手段：OpenAlex 按标题反查 DOI + OA PDF（仅在用户主动点击下载时联网）
         try:
@@ -1929,9 +1694,9 @@ def download_paper_pdf(project_id: str, paper_id: str):
     candidates: list[str] = []
     candidates.append(pdf_url)
     # 若当前是 doi.org 兜底，先尝试 Unpaywall/OpenAlex 找 OA PDF 直链（force 绕过缓存）
-    if "doi.org" in pdf_url and paper.doi:
+    if "doi.org" in pdf_url and doi:
         try:
-            oa = find_open_access_pdf(paper.doi, title=paper.title or "", force=True)
+            oa = find_open_access_pdf(doi, title=paper.title or "", force=True)
             if oa and oa not in candidates:
                 candidates.append(oa)
         except Exception:  # noqa: BLE001
@@ -2126,6 +1891,9 @@ def submit_human_response(project_id: str, req: HumanResponseRequest) -> dict:
     action = req.action or "continue"
     if action not in ("continue", "abort", "rollback"):
         raise HTTPException(status_code=400, detail="action 必须为 continue/abort/rollback")
+    pending = _BRIDGE.get_pending(project_id)
+    if req.expected_node_id and (pending or {}).get("context", {}).get("node_id") != req.expected_node_id:
+        raise HTTPException(status_code=409, detail="人工节点已变化，请刷新页面后重新确认")
     resp = HumanResponse(
         text=req.text,
         selected_option=req.selected_option,
@@ -2148,12 +1916,12 @@ def submit_human_response(project_id: str, req: HumanResponseRequest) -> dict:
     return {"project_id": project_id, "submitted": True, "action": action}
 
 
-# ===== 赛题对齐展示接口 =====
+# ===== 调研报告接口 =====
 
 
 @app.get("/api/projects/{project_id}/research-report")
 def get_research_report(project_id: str) -> dict:
-    """文献调研报告（赛题基本任务核心产出）。
+    """文献调研报告（research 阶段核心产出）。
 
     返回 cross_validation_report，含 Research Gaps / 共识 / 冲突 / 整体置信度。
     """
@@ -2166,7 +1934,7 @@ def get_research_report(project_id: str) -> dict:
     if not cv_report:
         return {
             "report": None,
-            "message": "尚未生成调研报告，请先运行 research 阶段（启动 Pipeline 或构效关系发现）",
+            "message": "尚未生成调研报告，请先运行 research 阶段（启动 Pipeline）",
         }
     # 补充论文计数
     try:
@@ -2180,277 +1948,11 @@ def get_research_report(project_id: str) -> dict:
     }
 
 
-@app.get("/api/projects/{project_id}/discovery-detail")
-def get_discovery_detail(project_id: str) -> dict:
-    """构效关系发现详细数据（路线 A 完整产出）。
-
-    返回：
-    - discovery_summary: 计数卡片
-    - discovery_hypotheses: 假设列表
-    - discovery_search_space: 搜索空间定义
-    - discovery_relationships: 验证后的构效关系（含交叉验证结果）
-    - discovery_search_trace: MCTS 搜索轨迹（前端可视化）
-    - discovery_literature_points: 文献数据点（前端散点图）
-    - discovery_report_content: Markdown 报告
-    - materials_cross_validation_report: Materials Project 交叉验证报告
-    """
-    _require_project(project_id)
-    try:
-        store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
-        kv = store.list_kv()
-    except Exception as e:  # noqa: BLE001
-        return {"error": f"读取失败: {e}"}
-    # 也补充 Claim 形式的发现（兼容旧项目）
-    relationships_from_claims: list[dict] = []
-    try:
-        for c in store.list_claims():
-            if c.source_stage == "discovery":
-                relationships_from_claims.append({
-                    "claim_id": c.claim_id,
-                    "statement": c.statement,
-                    "status": c.status.value,
-                    "evidence_refs": c.evidence_refs,
-                    "created_at": c.created_at.isoformat() if c.created_at else None,
-                })
-    except Exception:  # noqa: BLE001
-        pass
-    kv_relationships = kv.get("discovery_relationships", [])
-    # 优先用 KV 完整版（含 cross_validation 字段），无则用 Claim 版
-    relationships = kv_relationships if kv_relationships else relationships_from_claims
-    return {
-        "project_id": project_id,
-        "discovery_summary": kv.get("discovery_summary", {}),
-        "discovery_hypotheses": kv.get("discovery_hypotheses", []),
-        "discovery_search_space": kv.get("discovery_search_space", {}),
-        "discovery_relationships": relationships,
-        "discovery_search_trace": kv.get("discovery_search_trace", {}),
-        "discovery_literature_points": kv.get("discovery_literature_points", []),
-        "discovery_symbolic_regression": kv.get("discovery_symbolic_regression", {}),
-        "discovery_surrogate_calibration": kv.get("discovery_surrogate_calibration", {}),
-        "discovery_report_content": strip_think_tags(kv.get("discovery_report_content", "")),
-        "discovery_report_artifact_id": kv.get("discovery_report_artifact_id", ""),
-        "materials_cross_validation_report": kv.get("materials_cross_validation_report", {}),
-    }
-
-
-@app.get("/api/projects/{project_id}/materials-cross-validation")
-def get_materials_cross_validation(project_id: str) -> dict:
-    """Materials Project 交叉验证报告（赛题路线 A 硬要求）。"""
-    _require_project(project_id)
-    try:
-        store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
-        report = store.get_kv("materials_cross_validation_report")
-    except Exception as e:  # noqa: BLE001
-        return {"report": None, "error": f"读取失败: {e}"}
-    if not report:
-        return {
-            "report": None,
-            "message": "尚未生成交叉验证报告，请先运行构效关系发现",
-        }
-    return {"project_id": project_id, "report": report}
-
-
-@app.get("/api/projects/{project_id}/download/cross-validation")
-def download_cross_validation(project_id: str, format: str = "md") -> Response:
-    """下载 Materials Project 交叉验证报告（赛题路线 A 硬要求可提交材料）。
-
-    支持 md / docx / pdf 三种格式（与 download_artifact 一致）。
-    """
-    _require_project(project_id)
-    try:
-        store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
-        report = store.get_kv("materials_cross_validation_report") or {}
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"读取交叉验证报告失败: {e}")
-    md_content = _build_materials_cv_md(report, project_id)
-    base_filename = "materials_cross_validation"
-    fmt = (format or "md").lower()
-    if fmt == "docx":
-        return _md_to_docx_response(md_content, base_filename)
-    elif fmt == "pdf":
-        return _md_to_pdf_response(md_content, base_filename)
-    return _make_download(md_content, f"{base_filename}.md", "text/markdown", "md")
-
-
-def _build_materials_cv_md(report: dict, project_id: str) -> str:
-    """Materials Project 交叉验证报告 → 可提交 Markdown（直接贴 §4.2 当前结果）。"""
-    from core.tools import data_sources_to_markdown
-
-    parts: list[str] = []
-    parts.append("# Materials Project 交叉验证报告\n\n")
-    parts.append(f"**项目 ID**: `{project_id}`\n\n")
-    parts.append(f"**生成时间**: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
-    parts.append("---\n\n")
-
-    if not report:
-        parts.append("> 尚未生成交叉验证报告，请先运行构效关系发现。\n\n")
-        return "".join(parts)
-
-    # 顶部摘要
-    parts.append("## 摘要\n\n")
-    parts.append(f"- 验证发现总数: **{report.get('total_discoveries', 0)}**\n")
-    parts.append(f"- Materials Project API 命中: **{report.get('mp_validated', 0)}**\n")
-    parts.append(f"- 规则交叉验证通过: **{report.get('rule_validated', 0)}**\n")
-    parts.append(f"- 整体置信度: **{report.get('overall_confidence', 0):.3f}**\n")
-    src = report.get("source", "")
-    src_text = {
-        "mp": "Materials Project API + 规则双路",
-        "rule": "规则交叉验证（未配置 MP API key）",
-        "hybrid": "Materials Project API + 规则（混合）",
-    }.get(src, src or "未知")
-    parts.append(f"- 验证来源: **{src_text}**\n\n")
-
-    # 验证来源说明
-    notes = report.get("notes") or ""
-    if notes:
-        parts.append("## 验证方法说明\n\n")
-        parts.append(f"{notes}\n\n")
-        parts.append("> 配置 `MATERIALS_PROJECT_API_KEY` 环境变量可启用 Materials Project 数据库交叉验证。"
-                     "申请地址：https://next-gen.materialsproject.org/api\n\n")
-
-    # 逐条详情
-    results = report.get("results") or []
-    parts.append(f"## 逐条验证详情（{len(results)} 条）\n\n")
-    if not results:
-        parts.append("> 无验证详情。\n\n")
-    else:
-        parts.append("| # | 材料 | Novelty | MP 命中 | MP 带隙 | 规则通过 | 一致性 | 综合置信度 | 来源 |\n")
-        parts.append("|---|---|---|---|---|---|---|---|---|\n")
-        for i, r in enumerate(results, 1):
-            cells = [
-                str(i),
-                str(r.get("material") or "未识别"),
-                str(r.get("novelty") or "unknown"),
-                "✓" if r.get("mp_match") else "—",
-                f"{r.get('mp_band_gap'):.3g}" if isinstance(r.get("mp_band_gap"), (int, float)) else "—",
-                "✓" if r.get("rule_check_passed") else "—",
-                "✓" if r.get("literature_consistent") else "—",
-                f"{float(r.get('confidence', 0)):.3f}",
-                str(r.get("cross_validation_source") or "rule"),
-            ]
-            parts.append("| " + " | ".join(cells) + " |\n")
-        parts.append("\n")
-
-        # 展开每条的 rule_check_notes（评委可读性更强）
-        parts.append("### 规则检查备注（逐条）\n\n")
-        for i, r in enumerate(results, 1):
-            mat = r.get("material") or "未识别"
-            note = r.get("rule_check_notes") or "(无备注)"
-            parts.append(f"- **#{i} {mat}** — {note}\n")
-        parts.append("\n")
-
-    # 附录：合规披露引用
-    parts.append("---\n\n## 附录：外部数据源合规披露\n\n")
-    parts.append("本系统使用的所有外部数据源、许可证与降级策略详见方案文档 §5.3，"
-                 "集中登记表见 `core/tools/data_provenance.py`。摘要如下：\n\n")
-    parts.append(data_sources_to_markdown() + "\n")
-    return "".join(parts)
-
-
-@app.get("/api/projects/{project_id}/method-alignment")
-def get_method_alignment(project_id: str) -> dict:
-    """方法↔代码对齐（公式 LaTeX ↔ 实验代码关键词匹配）。
-
-    从方法 Artifact 抽取 LaTeX 公式，与实验代码做关键词匹配，
-    标注 mapped / partial / missing。
-    """
-    _require_project(project_id)
-    try:
-        store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
-        # 方法 Artifact
-        method_content = ""
-        method_artifacts: list[dict] = []
-        for art in store.list_artifact_versions("") if hasattr(store, "list_artifact_versions") else []:
-            method_artifacts.append({"artifact_id": art.artifact_id, "title": art.title})
-        # 简化版：扫描所有 METHOD_DOC 类型 Artifact
-        try:
-            with store._connect() as conn:  # type: ignore[attr-defined]
-                rows = conn.execute(
-                    "SELECT artifact_id, content FROM artifacts WHERE artifact_type = 'method_doc' ORDER BY created_at DESC LIMIT 5"
-                ).fetchall()
-                method_artifacts = [
-                    {"artifact_id": r["artifact_id"], "content": r["content"][:5000]}
-                    for r in rows
-                ]
-                if rows:
-                    method_content = rows[0]["content"]
-        except Exception:  # noqa: BLE001
-            pass
-        # 实验代码（取最近实验的 config，可能含代码片段）
-        experiments = store.list_experiments()
-        experiment_code_snippets: list[dict] = []
-        for exp in experiments[:5]:
-            experiment_code_snippets.append({
-                "experiment_id": exp.experiment_id,
-                "name": exp.name,
-                "status": exp.status.value,
-                "config_keys": list(exp.config.keys()) if exp.config else [],
-                "result_summary": exp.result_summary,
-            })
-    except Exception as e:  # noqa: BLE001
-        return {"error": f"读取失败: {e}"}
-
-    # 简化版对齐：从 method_content 抽取 LaTeX 公式标记
-    import re
-    formulas: list[dict] = []
-    if method_content:
-        # 抽取 $$...$$ / \[...\] / equation 环境的公式
-        formula_patterns = [
-            (r"\$\$(.+?)\$\$", "display"),
-            (r"\\\[(.+?)\\\]", "display"),
-            (r"\\begin\{equation\}(.+?)\\end\{equation\}", "display"),
-            (r"\$([^$\n]+?)\$", "inline"),
-        ]
-        seen = set()
-        for pat, kind in formula_patterns:
-            for m in re.finditer(pat, method_content, re.DOTALL):
-                f = m.group(1).strip()
-                if f and f not in seen and len(f) < 500:
-                    seen.add(f)
-                    # 关键词匹配：在实验代码片段中查找公式变量
-                    keywords = re.findall(r"[a-zA-Z_][a-zA-Z0-9_]*", f)
-                    keywords = [k for k in keywords if len(k) > 2 and k not in
-                                ("frac", "sum", "int", "mathrm", "text", "left", "right",
-                                 "begin", "end", "alpha", "beta", "gamma", "delta", "theta",
-                                 "lambda", "mu", "sigma", "phi", "psi", "omega")]
-                    matched_kw = []
-                    for kw in keywords[:10]:
-                        for exp in experiments:
-                            cfg_str = str(exp.config or "")
-                            if kw in cfg_str:
-                                matched_kw.append(kw)
-                                break
-                    status = "mapped" if matched_kw else (
-                        "partial" if keywords else "missing"
-                    )
-                    formulas.append({
-                        "formula": f,
-                        "kind": kind,
-                        "keywords": keywords[:10],
-                        "matched_keywords": matched_kw,
-                        "alignment_status": status,
-                    })
-    return {
-        "project_id": project_id,
-        "method_artifacts": method_artifacts,
-        "method_content_preview": method_content[:2000] if method_content else "",
-        "experiment_code_snippets": experiment_code_snippets,
-        "formulas": formulas,
-        "alignment_summary": {
-            "total_formulas": len(formulas),
-            "mapped": sum(1 for f in formulas if f["alignment_status"] == "mapped"),
-            "partial": sum(1 for f in formulas if f["alignment_status"] == "partial"),
-            "missing": sum(1 for f in formulas if f["alignment_status"] == "missing"),
-        },
-    }
-
-
 @app.get("/api/projects/{project_id}/dashboard")
 def get_dashboard(project_id: str) -> dict:
-    """首页 Dashboard 聚合数据（赛题对齐展示）。
+    """首页 Dashboard 聚合数据。
 
-    一次返回所有计数 + 调研报告摘要 + 发现摘要 + 交叉验证摘要，
-    让前端 Dashboard 单次拉取即可渲染。
+    一次返回所有计数 + 调研报告摘要，让前端 Dashboard 单次拉取即可渲染。
     """
     state = _require_project(project_id)
     try:
@@ -2460,40 +1962,13 @@ def get_dashboard(project_id: str) -> dict:
             "ideas": len(store.list_ideas()),
             "claims": len(store.list_claims()),
             "experiments": len(store.list_experiments()),
-            "discovery_claims": sum(
-                1 for c in store.list_claims() if c.source_stage == "discovery"
-            ),
+            "gaps": store.gap_stats()["total"],
         }
         cv_report = store.get_kv("cross_validation_report") or {}
-        discovery_summary = store.get_kv("discovery_summary") or {}
-        materials_cv = store.get_kv("materials_cross_validation_report") or {}
     except Exception as e:  # noqa: BLE001
         return {"error": f"读取失败: {e}"}
 
     # 方法对齐摘要（公式数）
-    method_alignment_summary = {"total_formulas": 0}
-    try:
-        from core.artifacts import ArtifactManager as _AM
-        from core.knowledge import ArtifactType
-        am = _AM(_CONFIG.paths.project_db(project_id))
-        # 统计 FORMULA + METHOD_DOC 类型产出
-        total_formulas = 0
-        for at in (ArtifactType.FORMULA, ArtifactType.METHOD_DOC):
-            try:
-                arts = am.list_artifacts(artifact_type=at)
-                for a in arts:
-                    content = a.content or {}
-                    if isinstance(content, dict):
-                        formulas = content.get("formula_code_map") or content.get("formulas") or []
-                        total_formulas += len(formulas) if isinstance(formulas, list) else 0
-                    else:
-                        total_formulas += 1
-            except Exception:  # noqa: BLE001
-                pass
-        method_alignment_summary["total_formulas"] = total_formulas
-    except Exception:  # noqa: BLE001
-        pass
-
     # 论文写作摘要
     writing_summary = {"artifact_count": 0}
     try:
@@ -2524,6 +1999,7 @@ def get_dashboard(project_id: str) -> dict:
     return {
         "project_id": project_id,
         "topic": state.topic,
+        "domain": state.domain,
         "status": state.status,
         "summary": state.summary,
         "recommendation": state.recommendation,
@@ -2537,15 +2013,6 @@ def get_dashboard(project_id: str) -> dict:
             "conflicts_count": len(cv_report.get("conflicts", [])),
             "overall_confidence": cv_report.get("overall_confidence", 0),
         },
-        "discovery_summary": discovery_summary,
-        "materials_cv_summary": {
-            "total_discoveries": materials_cv.get("total_discoveries", 0),
-            "mp_validated": materials_cv.get("mp_validated", 0),
-            "rule_validated": materials_cv.get("rule_validated", 0),
-            "overall_confidence": materials_cv.get("overall_confidence", 0),
-            "source": materials_cv.get("source", ""),
-        },
-        "method_alignment_summary": method_alignment_summary,
         "writing_summary": writing_summary,
         "pending_human": _BRIDGE.get_pending(project_id),
     }
@@ -2560,7 +2027,7 @@ def download_artifact(project_id: str, artifact_type: str, format: str = "md"):
 
     支持类型：
     - research-report：文献调研报告
-    - discovery-report：构效关系发现报告
+    - discovery-report：关系发现报告
     - experiment-code：实验代码（仅 md/py 格式）
     - experiment-results：实验结果（含 metrics）
     - method-doc：方法文档
@@ -2599,7 +2066,7 @@ def download_artifact(project_id: str, artifact_type: str, format: str = "md"):
             summary = store.get_kv("discovery_summary") or {}
             if summary:
                 content = (
-                    "# 构效关系发现报告\n\n"
+                    "# 关系发现报告\n\n"
                     f"- 候选假设数：{summary.get('hypotheses', 0)}\n"
                     f"- 验证发现数：{summary.get('relationships', 0)}\n"
                     f"- 其中新颖发现：{summary.get('novel', 0)}\n\n"
@@ -2608,8 +2075,8 @@ def download_artifact(project_id: str, artifact_type: str, format: str = "md"):
                 )
             else:
                 content = (
-                    "# 构效关系发现报告\n\n"
-                    "> 尚未生成发现报告，请先运行「构效关系发现」流程。"
+                    "# 关系发现报告\n\n"
+                    "> 尚未生成发现报告，请先运行「关系发现」流程。"
                 )
         md_content = content
         base_filename = "discovery_report"
@@ -3127,19 +2594,19 @@ def _build_full_report_md(store: KnowledgeStore, project_id: str) -> str:
     except Exception:
         pass
 
-    # 7. 构效关系发现（独立子系统：MCTS + LLM 引导搜索）
+    # 7. 关系发现（可选子流程：MCTS + LLM 引导搜索）
     discovery_content = strip_think_tags(store.get_kv("discovery_report_content") or "")
     if not discovery_content:
         summary = store.get_kv("discovery_summary") or {}
         if summary:
             discovery_content = (
-                "# 构效关系发现\n\n"
+                "# 关系发现\n\n"
                 f"- 候选假设数：{summary.get('hypotheses', 0)}\n"
                 f"- 验证发现数：{summary.get('relationships', 0)}\n"
                 f"- 其中新颖发现：{summary.get('novel', 0)}\n"
             )
     if discovery_content:
-        parts.append("\n\n---\n\n# 第七部分：构效关系发现\n\n")
+        parts.append("\n\n---\n\n# 第七部分：关系发现\n\n")
         parts.append(discovery_content)
 
     return "".join(parts) if parts else "# 全流程报告\n\n（暂无产出）"
@@ -3523,7 +2990,7 @@ async def upload_paper(
     figures_count = 0
 
     if ext == ".pdf":
-        # PDF：保存到项目目录，调用 MinerU 解析结构化内容（赛题三·方向三推荐工具）
+        # PDF：保存到项目目录，调用 MinerU 解析结构化内容（推荐工具）
         upload_dir = _CONFIG.paths.project_dir(project_id) / "uploads"
         upload_dir.mkdir(parents=True, exist_ok=True)
         pdf_path = upload_dir / filename
@@ -3705,7 +3172,7 @@ def index() -> FileResponse:
 
 @app.get("/api/data-sources")
 def list_data_sources() -> dict:
-    """外部数据源合规登记（赛题 §5.3 支撑）。
+    """外部数据源合规登记。
 
     数据源元信息集中登记在 `core/tools/data_provenance.py`，
     本端点暴露给前端 dashboard 的"数据源合规性"卡片。

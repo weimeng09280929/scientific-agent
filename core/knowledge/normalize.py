@@ -1,9 +1,7 @@
-"""材料知识数据标准化（Task 2 增强）。
+"""领域知识数据标准化（Task 2 增强）。
 
-将 LLM 抽取的杂乱字段归一为材料科学标准体系，供前端统一展示与检索：
-1. 性能指标归一化：ZT / zT / thermoelectric_figure_of_merit → 标准「热电优值 (ZT)」
-2. 合成方法分类：ball milling / DFT computation / solid-state reaction → 工艺类别
-3. 材料体系分类：按名称/化学式识别 Bi2Te3 基、PbTe 基、钙钛矿等体系
+将 LLM 抽取的杂乱字段归一为标准体系，供前端统一展示与检索；
+材料科学相关的具体归一规则作为材料领域画像的一部分保留（领域可选）。
 """
 from __future__ import annotations
 

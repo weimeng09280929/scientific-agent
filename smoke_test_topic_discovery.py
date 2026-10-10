@@ -67,7 +67,7 @@ def main():
     # 验证每条推荐结构
     for i, rec in enumerate(recs):
         required_fields = ["topic", "rationale", "innovation_point",
-                           "recommended_materials", "trend_summary",
+                           "recommended_objects", "trend_summary",
                            "difficulty", "novelty",
                            "relevance", "popularity_score", "growth_rate"]
         missing = [f for f in required_fields if f not in rec]

@@ -1,21 +1,21 @@
-"""discovery 阶段 Agent / Tool 节点实现（路线 A：构效关系发现）。
+"""discovery 阶段 Agent / Tool 节点实现（关系发现子流程）。
 
 节点拓扑（LLM 深度参与搜索过程）：
-    HypothesisSeedAgent（从 Research Gap 生成候选构效关系假设作为搜索种子）
+    HypothesisSeedAgent（从 Research Gap 生成候选关系假设作为搜索种子）
     → SearchSpaceAgent（定义搜索空间 + 从文献抽取数据点）
     → LLMGuidedSearchAgent（核心创新：MCTS + LLM 融合，生成候选/评估合理性/剪枝）
     → DiscoveryValidateAgent（文献交叉验证 + 新颖性评估 + 证据链关联）
     → DiscoveryReportAgent（结构化发现报告 + 物理机制解释 + Artifact）
 
 核心创新（区别于 LLM4Mat/ChemCrow 等仅用 LLM 生成搜索代码的做法）：
-- LLM 生成候选构效关系假设作为搜索种群种子
+- LLM 生成候选关系假设作为搜索种群种子
 - LLM 评估中间结果的科学合理性（物理合法性、与文献一致性）
 - LLM 引导搜索空间剪枝（排除物理不合理的区域）
 - 文献抽取的 (结构, 性能) 数据点作为代理模型训练样本，确保证据可追溯
 
 执行模式：
 - dry_run=True  ：用占位数据返回，不调用 LLM（验证架构用）
-- dry_run=False ：真实调用 MiniMax M3，真实运行 MCTS 搜索循环
+- dry_run=False ：真实调用配置的 LLM（glm-5.3-flash），真实运行 MCTS 搜索循环
 """
 from __future__ import annotations
 
@@ -94,7 +94,7 @@ def _compose_mechanism(
 ) -> str:
     """把结构化 5 要素 mechanism 拼接成可读文本。
 
-    满足赛题路线 A「构效关系须附带清晰科学解释」要求。
+    满足系统设计要求「关系须附带清晰科学解释」要求。
     """
     parts: list[str] = []
     if physical_principle:
@@ -114,9 +114,9 @@ def _compose_mechanism(
 # ===== 结构化输出 Schema =====
 
 class HypothesisItem(BaseModel):
-    """单条构效关系假设。"""
+    """单条关系假设。"""
 
-    hypothesis: str = Field(default="", description="构效关系假设陈述")
+    hypothesis: str = Field(default="", description="关系假设陈述")
     variables: list[str] = Field(default_factory=list, description="涉及的变量名")
     target_property: str = Field(default="property", description="目标性能名（如 ZT）")
     rationale: str = Field(default="", description="假设依据（关联 Gap/冲突/共识）")
@@ -175,7 +175,7 @@ class CandidateEvaluationSchema(BaseModel):
     """LLM 候选评估 schema（MCTS 评估阶段）。
 
     mechanism 改为结构化：物理原理 + 因果链 + 理论支撑 + 量化解释 + 领域术语。
-    满足赛题路线 A「构效关系须附带清晰科学解释，避免黑箱输出」要求。
+    满足系统设计要求「关系须附带清晰科学解释，避免黑箱输出」要求。
     """
 
     config: dict = Field(description="评估的材料配置 {变量名: 值}")
@@ -210,15 +210,15 @@ class CandidateEvaluationSchema(BaseModel):
 
 
 class RelationshipSchema(BaseModel):
-    """单条验证后的构效关系 schema。"""
+    """单条验证后的关系 schema。"""
 
-    relationship: str = Field(description="构效关系陈述")
+    relationship: str = Field(description="关系陈述")
     config: dict = Field(default_factory=dict, description="最优配置")
     predicted_target: float = 0.0
     evidence_paper_ids: list[str] = Field(
         default_factory=list, description="关联的 Paper ID"
     )
-    # 新颖性增强（满足赛题路线 A「区分新知与已知」要求）
+    # 新颖性增强（满足系统设计要求「区分新知与已知」要求）
     novelty: str = Field(description="novel / partially_known / known")
     novelty_reason: str = ""
     novelty_score: float = Field(
@@ -241,7 +241,7 @@ class RelationshipSchema(BaseModel):
 
 
 class RelationshipBatchSchema(BaseModel):
-    """构效关系批量验证 schema。"""
+    """关系批量验证 schema。"""
 
     relationships: list[RelationshipSchema]
 
@@ -252,7 +252,7 @@ class HypothesisSeedAgent(AgentNode):
     """候选假设生成 Agent。
 
     从 research 阶段的 Research Gap + 共识/冲突 + 入库论文出发，
-    LLM 生成 3-5 个候选构效关系假设作为搜索种子。
+    LLM 生成 3-5 个候选关系假设作为搜索种子。
 
     设计要点：
     - 每个假设关联一个 Research Gap（确保假设有文献依据）
@@ -300,8 +300,8 @@ class HypothesisSeedAgent(AgentNode):
                     task_type=self.task_type,
                     output_schema=HypothesisBatchSchema,
                     system=(
-                        "你是材料科学构效关系发现助手。基于文献调研的 Research Gap、"
-                        "冲突结论与共识，生成 3-5 个候选构效关系假设作为搜索种子。\n"
+                        "你是材料科学关系发现助手。基于文献调研的 Research Gap、"
+                        "冲突结论与共识，生成 3-5 个候选关系假设作为搜索种子。\n"
                         "要求：\n"
                         "1. 每个假设必须关联一个 Research Gap（gap_ref）\n"
                         "2. 假设涉及可量化的变量（variables）与明确的目标性能（target_property）\n"
@@ -338,7 +338,7 @@ class HypothesisSeedAgent(AgentNode):
         return NodeResult(
             status=NodeStatus.SUCCESS,
             output=output,
-            summary=f"生成 {len(hypotheses)} 个候选构效关系假设（搜索种子）",
+            summary=f"生成 {len(hypotheses)} 个候选关系假设（搜索种子）",
         )
 
     @staticmethod
@@ -357,7 +357,7 @@ class HypothesisSeedAgent(AgentNode):
 
         return [
             {
-                "hypothesis": f"假设 {i + 1}：基于 Gap「{g[:40]}」的构效关系方向",
+                "hypothesis": f"假设 {i + 1}：基于 Gap「{g[:40]}」的关系方向",
                 "variables": ["var_1", "var_2"],
                 "target_property": "ZT",
                 "rationale": f"关联 Research Gap：{g[:60]}",
@@ -406,7 +406,7 @@ class SearchSpaceAgent(AgentNode):
 
         # 收集论文 chunk 文本作为数据点抽取素材
         chunk_texts = self._collect_chunks(store, input_obj.paper_ids)
-        # 直接从 Sciverse 获取含数值的证据片段（赛题推荐数据源，天然含 ZT/温度等数值）
+        # 直接从 Sciverse 获取含数值的证据片段（系统设计推荐数据源，天然含 ZT/温度等数值）
         sciverse_evidences = self._collect_sciverse_evidence(input_obj.topic)
         all_evidence_texts = chunk_texts + sciverse_evidences
 
@@ -416,7 +416,7 @@ class SearchSpaceAgent(AgentNode):
                     task_type=self.task_type,
                     output_schema=SearchSpaceSchema,
                     system=(
-                        "你是材料科学搜索空间设计助手。基于候选假设定义构效关系搜索空间：\n"
+                        "你是材料科学搜索空间设计助手。基于候选假设定义关系搜索空间：\n"
                         "1. variables：2-5 个可量化的材料变量（组分/结构参数），含定义域与单位\n"
                         "   - **重要**：如果搜索空间涉及某一特定材料体系（如 Bi2Te3、SnSe、PbTe 等），\n"
                         "     必须在 variables 中加入名为 `material` 的类别变量，categories 列出所有候选材料；\n"
@@ -514,7 +514,7 @@ class SearchSpaceAgent(AgentNode):
 
     @staticmethod
     def _collect_sciverse_evidence(topic: str) -> list[str]:
-        """直接从 Sciverse 获取含数值的证据片段（赛题推荐数据源）。
+        """直接从 Sciverse 获取含数值的证据片段（系统设计推荐数据源）。
 
         Sciverse agentic_search 返回片段级证据，天然含 ZT/温度/Seebeck 等数值，
         比 chunk 摘要更适合数据点抽取。查询专门针对含数值的实验结果。
@@ -667,7 +667,7 @@ class SearchSpaceAgent(AgentNode):
 # ===== LLMGuidedSearchAgent（核心创新节点）=====
 
 class LLMGuidedSearchAgent(AgentNode):
-    """LLM 引导搜索 Agent（路线 A 核心创新）。
+    """LLM 引导搜索 Agent（核心创新）。
 
     MCTS 启发式搜索 + LLM 深度融合：
     - 选择：UCB1 选高潜力父配置
@@ -1054,7 +1054,7 @@ class LLMGuidedSearchAgent(AgentNode):
 class DiscoveryValidateAgent(AgentNode):
     """发现验证 Agent。
 
-    对搜索产出的候选构效关系做：
+    对搜索产出的候选关系做：
     - 文献交叉验证：与已知文献一致性检查（不矛盾）
     - 新颖性评估：novel / partially_known / known
     - 证据链关联：关联 paper_id，形成可追溯证据链
@@ -1062,7 +1062,7 @@ class DiscoveryValidateAgent(AgentNode):
 
     设计要点：
     - known 的发现置信度低（不新颖），novel 的发现需更强证据支撑
-    - evidence_refs 关联具体 paper_id，满足赛题「文献溯源完整性与可信度」
+    - evidence_refs 关联具体 paper_id，满足系统设计「文献溯源完整性与可信度」
     """
 
     node_type = "discovery_validate"
@@ -1090,7 +1090,7 @@ class DiscoveryValidateAgent(AgentNode):
             return NodeResult(
                 status=NodeStatus.SUCCESS,
                 output=output,
-                summary="无候选构效关系可验证",
+                summary="无候选关系可验证",
             )
 
         # ===== 规则硬筛 1：物理边界（热力学/物理客观定律，先于 LLM 验证） =====
@@ -1137,8 +1137,8 @@ class DiscoveryValidateAgent(AgentNode):
                     task_type=self.task_type,
                     output_schema=RelationshipBatchSchema,
                     system=(
-                        "你是材料科学发现验证助手。对候选构效关系做文献交叉验证与新颖性评估：\n"
-                        "1. relationship：用一句话陈述构效关系（含具体变量组合与预测性能）\n"
+                        "你是材料科学发现验证助手。对候选关系做文献交叉验证与新颖性评估：\n"
+                        "1. relationship：用一句话陈述关系（含具体变量组合与预测性能）\n"
                         "2. evidence_paper_ids：从给定 paper_ids 中选取支持该发现的论文\n"
                         "3. novelty：novel / partially_known / known\n"
                         "   - **novel**：该**具体变量组合**（如特定掺杂浓度+温度+材料体系）文献未明确报告，\n"
@@ -1167,7 +1167,7 @@ class DiscoveryValidateAgent(AgentNode):
                     prompt=(
                         f"目标性能：{target_prop}\n"
                         f"可用 paper_ids: {input_obj.paper_ids[:15]}\n\n"
-                        f"候选构效关系（含代理预测、机制与证据状态）：\n"
+                        f"候选关系（含代理预测、机制与证据状态）：\n"
                         + json.dumps(screened, ensure_ascii=False, indent=2)
                         + "\n\n=== 评估要点 ===\n"
                         "对每个候选，判断其具体变量组合（材料+掺杂+温度等）是否在文献中被直接报告。\n"
@@ -1199,7 +1199,7 @@ class DiscoveryValidateAgent(AgentNode):
                     )
                     relationships.append(rel)
 
-                # 真实入库为 Claim（构效关系发现即 Claim）
+                # 真实入库为 Claim（关系发现即 Claim）
                 if store is not None:
                     for rel in relationships:
                         try:
@@ -1246,7 +1246,7 @@ class DiscoveryValidateAgent(AgentNode):
         output = DiscoveryValidateOutput(relationships=relationships)
         n_novel = sum(1 for r in relationships if r.get("novelty") == "novel")
 
-        # 赛题路线 A 硬要求：与公开数据库（Materials Project + OQMD）交叉验证
+        # 系统设计要求 硬要求：与公开数据库（Materials Project + OQMD）交叉验证
         # 无 API key 时降级为规则交叉验证（基于已知热电材料体系物理范围）
         if store is not None and relationships:
             try:
@@ -1277,7 +1277,7 @@ class DiscoveryValidateAgent(AgentNode):
                         # 用交叉验证后调整的置信度覆盖原 confidence
                         rel["confidence"] = cv_r.confidence
 
-                # OQMD 交叉验证（赛题路线 A 加分项）
+                # OQMD 交叉验证（系统设计要求 加分项）
                 oqmd_results: list[dict] = []
                 for rel in relationships:
                     material = (rel.get("config", {}) or {}).get("material", "")
@@ -1301,7 +1301,7 @@ class DiscoveryValidateAgent(AgentNode):
                             "error": str(e),
                         }
 
-                # NOMAD 交叉验证（赛题路线 A 加分项：nomad-lab.eu 开放计算数据）
+                # NOMAD 交叉验证（系统设计要求 加分项：nomad-lab.eu 开放计算数据）
                 nomad_results: list[dict] = []
                 try:
                     from core.tools import query_nomad_by_formula
@@ -1351,7 +1351,7 @@ class DiscoveryValidateAgent(AgentNode):
             except Exception as e:
                 logger.warning("材料数据库交叉验证失败: %s", e)
 
-        # ===== 发现可信度量化评分（路线 A 客观指标，独立于交叉验证）=====
+        # ===== 发现可信度量化评分（客观指标，独立于交叉验证）=====
         # 5 维度：外推安全 / 文献密度 / 机制论证 / 交叉验证 / CI 合理性
         # 注：即使没有 MP/OQMD API key 也跑（基于已有数据）
         if store is not None and relationships:
@@ -1410,7 +1410,7 @@ class DiscoveryValidateAgent(AgentNode):
                 logger.warning("发现可信度评分失败: %s", e)
 
         summary_text = (
-            f"验证 {len(relationships)} 条构效关系，"
+            f"验证 {len(relationships)} 条关系，"
             f"其中 {n_novel} 条 novel"
         )
         if n_physics_pruned:
@@ -1588,7 +1588,7 @@ class DiscoveryValidateAgent(AgentNode):
             domain_specific_concept = "Phonon-glass electron-crystal (PGEC)"
 
             rels.append({
-                "relationship": f"构效关系 {i + 1}：{input_obj.search_space.get('target_property', '?')} "
+                "relationship": f"关系 {i + 1}：{input_obj.search_space.get('target_property', '?')} "
                                 f"受 {list(cfg.keys())} 影响",
                 "config": cfg,
                 "predicted_target": c.get("predicted_target", 0.0),
@@ -1620,9 +1620,9 @@ class DiscoveryValidateAgent(AgentNode):
 class DiscoveryReportAgent(AgentNode):
     """发现报告生成 Agent。
 
-    生成结构化构效关系发现报告，含：
+    生成结构化关系发现报告，含：
     - 发现概览
-    - 每条构效关系（陈述 + 证据链 + 物理机制 + 置信度）
+    - 每条关系（陈述 + 证据链 + 物理机制 + 置信度）
     - 新颖性分析
     - 与已知文献的差异
 
@@ -1655,12 +1655,12 @@ class DiscoveryReportAgent(AgentNode):
                 resp = registry.complete(
                     task_type=self.task_type,
                     system=(
-                        "你是材料科学发现报告撰写助手。基于验证后的构效关系发现，"
+                        "你是材料科学发现报告撰写助手。基于验证后的关系发现，"
                         "生成结构化 Markdown 报告，章节必须完整：\n"
                         "1. 概览（搜索空间、假设、发现数量、平均置信度）\n"
                         "2. 方法学（MCTS+LLM 搜索、加权 KNN 代理模型、物理边界硬筛、交叉验证、五维评分）\n"
                         "3. 数据来源与证据（文献数据点、Materials Project/OQMD/NOMAD、物理边界表）\n"
-                        "4. 每条构效关系：陈述 + 物理机制 + 证据链 + 置信度 + 新颖性 + 预测区间\n"
+                        "4. 每条关系：陈述 + 物理机制 + 证据链 + 置信度 + 新颖性 + 预测区间\n"
                         "5. 证据状态披露（明确标注「发现」vs「待验证假设」，数值为插值估计非实测/DFT）\n"
                         "6. 局限性（代理模型依赖文献数据、搜索空间有限）\n"
                         "报告应清晰区分「新发现」与「文献已知」，不夸大，"
@@ -1669,7 +1669,7 @@ class DiscoveryReportAgent(AgentNode):
                     prompt=(
                         f"搜索空间：{json.dumps(input_obj.search_space, ensure_ascii=False)}\n\n"
                         f"候选假设：{json.dumps(input_obj.hypotheses, ensure_ascii=False)}\n\n"
-                        f"验证后的构效关系发现：\n"
+                        f"验证后的关系发现：\n"
                         + json.dumps(input_obj.relationships, ensure_ascii=False, indent=2)
                     ),
                 )
@@ -1688,7 +1688,7 @@ class DiscoveryReportAgent(AgentNode):
             try:
                 artifact = manager.create_artifact(
                     artifact_type=ArtifactType.METHOD_DOC,  # 复用 METHOD_DOC 类型承载发现报告
-                    title="构效关系发现报告",
+                    title="关系发现报告",
                     content=report_content,
                     cites_claim_ids=[
                         r.get("claim_id") for r in input_obj.relationships
@@ -1741,7 +1741,7 @@ class DiscoveryReportAgent(AgentNode):
         return NodeResult(
             status=NodeStatus.SUCCESS,
             output=output,
-            summary=f"生成构效关系发现报告（{len(input_obj.relationships)} 条发现）",
+            summary=f"生成关系发现报告（{len(input_obj.relationships)} 条发现）",
         )
 
     @staticmethod
@@ -1763,9 +1763,9 @@ class DiscoveryReportAgent(AgentNode):
         low_conf = [r for r in rels if r.get("confidence", 0) < 0.4]
 
         lines = [
-            "# 构效关系发现报告",
+            "# 关系发现报告",
             "",
-            "> **报告类型**：基于 MCTS + LLM 引导搜索的材料构效关系发现",
+            "> **报告类型**：基于 MCTS + LLM 引导搜索的材料关系发现",
             f"> **目标属性**：{target_prop}",
             "> **生成模式**：规则模板（确定性生成，预测值为文献数据插值估计，非实测、非 DFT）",
             "",
@@ -1830,9 +1830,9 @@ class DiscoveryReportAgent(AgentNode):
             )
         lines.append("")
 
-        # 3. 构效关系清单
+        # 3. 关系清单
         if rels:
-            lines.append("## 6. 构效关系详细清单")
+            lines.append("## 6. 关系详细清单")
             lines.append("")
             for i, r in enumerate(rels):
                 config = r.get("config", {}) or {}

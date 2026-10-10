@@ -19,7 +19,7 @@ from core.orchestration.node import NodeInput, NodeOutput
 class TrendFetchInput(NodeInput):
     """趋势数据获取输入。"""
 
-    # 用户研究兴趣/领域关键词（如 "thermoelectric materials"）
+    # 用户研究兴趣/领域关键词（如 "thermoelectric materials"，由用户兴趣决定，不限学科）
     interest: str
 
 
@@ -78,11 +78,12 @@ class TopicRecommendOutput(NodeOutput):
     recommendations 结构（list of dict，按 popularity_score 降序）：
     [
         {
-            "topic": "基于高熵合金化的Bi₂Te₃热电材料ZT值突破研究",
+            "topic": "推荐主题名称（由用户研究领域决定，如 AI 领域可能是"
+                     "「基于主动学习的低资源场景模型筛选框架」）",
             "rationale": "该方向增长率 120%，目前仅 3 篇论文...",
-            "innovation_point": "使用机器学习辅助筛选高熵合金元素组合",
-            "recommended_materials": ["Bi2Te3", "Sb2Te3", "高熵合金化体系"],
-            "trend_summary": "halide perovskite 增长 180%，machine learning 增长 150%",
+            "innovation_point": "具体可操作的创新切入点",
+            "recommended_objects": ["研究对象A", "研究对象B", "研究对象C"],
+            "trend_summary": "核心关键词增长 120%，方法论关键词增长 150%",
             "difficulty": "medium",
             "novelty": "high",
             "relevance": "high",          # 与用户兴趣关联度 low/medium/high
@@ -91,6 +92,10 @@ class TopicRecommendOutput(NodeOutput):
         },
         ...
     ]
+
+    兼容说明：字段 recommended_objects 原名 recommended_materials，
+    更名原因见 stages/topic_discovery/agents.py 中 TopicRecommendationItem 注释；
+    前端展示时兼容读取两者。
     """
 
     recommendations: list[dict[str, Any]]

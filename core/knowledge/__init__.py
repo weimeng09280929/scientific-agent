@@ -50,6 +50,18 @@ from core.knowledge.store import KnowledgeStore, StoreError
 from core.knowledge.vector_store import VectorStore, ChromaVectorStore
 from core.knowledge.retriever import Retriever, RetrievalResult
 
+# 研究领域画像：把「领域知识」外置为配置，让同一套流程适配任意学科
+# （材料只是预设之一，另有化学/生命科学/医学/AI/物理/能源，也支持自定义）
+from core.knowledge.domain_profile import (
+    DOMAIN_PROFILES,
+    GENERIC_PROFILE,
+    get_domain_profile,
+    domain_label,
+    build_domain_hint,
+    build_extraction_system_prompt,
+    build_topic_recommend_hint,
+)
+
 __all__ = [
     "EntityId",
     "Paper",
@@ -85,4 +97,11 @@ __all__ = [
     "ChromaVectorStore",
     "Retriever",
     "RetrievalResult",
+    "DOMAIN_PROFILES",
+    "GENERIC_PROFILE",
+    "get_domain_profile",
+    "domain_label",
+    "build_domain_hint",
+    "build_extraction_system_prompt",
+    "build_topic_recommend_hint",
 ]

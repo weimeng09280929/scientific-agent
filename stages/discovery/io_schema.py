@@ -1,14 +1,14 @@
 """discovery 阶段节点 IO schema 定义。
 
-构效关系发现阶段（路线 A）：
-    候选假设生成（从 Research Gap 出发，LLM 生成构效关系假设作为搜索种子）
+关系发现子流程：
+    候选假设生成（从 Research Gap 出发，LLM 生成关系假设作为搜索种子）
     → 搜索空间定义（材料变量/性能目标/物理约束，从文献抽取数据点）
     → LLM 引导搜索（MCTS + LLM 融合：生成候选 + 评估合理性 + 剪枝）
     → 发现验证（文献交叉验证 + 新颖性评估 + 证据链关联）
     → 发现报告（结构化报告 + 物理机制解释 + Artifact）
 
 核心创新：LLM 深度参与搜索过程，而非仅生成搜索代码。
-- LLM 生成候选构效关系假设作为搜索种群种子
+- LLM 生成候选关系假设作为搜索种群种子
 - LLM 评估中间结果的科学合理性（物理合法性、与文献一致性）
 - LLM 引导搜索空间剪枝（排除物理不合理的区域）
 """
@@ -25,7 +25,7 @@ class HypothesisSeedInput(NodeInput):
     """候选假设生成输入。
 
     从 research 阶段的 Research Gap + 共识/冲突 + 入库论文出发，
-    LLM 生成候选构效关系假设作为搜索种子。
+    LLM 生成候选关系假设作为搜索种子。
 
     注：gaps/consensus 兼容两种格式：list[str]（旧版字符串）与 list[dict]（结构化 Gap）
     """
@@ -38,7 +38,7 @@ class HypothesisSeedInput(NodeInput):
 
 
 class HypothesisSeedOutput(NodeOutput):
-    """候选假设生成输出：构效关系假设列表（搜索种子）。
+    """候选假设生成输出：关系假设列表（搜索种子）。
 
     hypotheses 结构（每条假设）：
         {
@@ -95,7 +95,7 @@ class LLMGuidedSearchInput(NodeInput):
 
 
 class LLMGuidedSearchOutput(NodeOutput):
-    """LLM 引导搜索输出：候选构效关系列表。
+    """LLM 引导搜索输出：候选关系列表。
 
     candidates 结构（每条候选）：
         {
@@ -123,11 +123,11 @@ class DiscoveryValidateInput(NodeInput):
 
 
 class DiscoveryValidateOutput(NodeOutput):
-    """发现验证输出：经验证与新颖性评估的构效关系列表。
+    """发现验证输出：经验证与新颖性评估的关系列表。
 
     relationships 结构（每条发现）：
         {
-            "relationship": str,           # 构效关系陈述
+            "relationship": str,           # 关系陈述
             "config": {var: value},        # 最优配置
             "predicted_target": float,     # 预测性能
             "evidence_refs": list[dict],   # 证据链 [{type:"paper", id:...}]

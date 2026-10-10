@@ -9,7 +9,7 @@
 
 执行模式：
 - dry_run=True  ：用占位数据返回，不调用 LLM（默认，验证架构用）
-- dry_run=False ：真实调用 MiniMax M3，真实入库 Idea/Claim 实体
+- dry_run=False ：真实调用配置的 LLM（glm-5.3-flash），真实入库 Idea/Claim 实体
 """
 from __future__ import annotations
 
