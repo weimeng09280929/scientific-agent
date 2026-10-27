@@ -15,6 +15,7 @@ import json
 import logging
 import re
 from core.research_tasks.coverage import scope_text
+from core.llm.public_errors import fallback_note, public_error
 
 logger = logging.getLogger(__name__)
 
@@ -203,13 +204,10 @@ def synthesize_report(
     except SynthesisValidationError:
         raise
     except Exception as exc:  # 截断/空回复/不可解析：不发布不完整内容，回退规则模式
-        logger.warning("整理模型输出不可用，回退规则模式报告: %s", exc)
+        logger.warning("整理模型输出不可用，回退规则模式报告: %s", public_error(exc))
         report = _rule_report(topic, queries, ranked, source_outcomes, limits)
         report["evidence_note"] = _meta_only_note(ranked)
-        return _with_coverage(report,coverage), (
-            f"模型整理失败，已回退规则模式报告（{type(exc).__name__}: {str(exc)[:120]}）；"
-            "截断或不可解析的输出未被采用。"
-        )
+        return _with_coverage(report,coverage), fallback_note("synthesis", exc)
     report = _validate_report(data, candidate_ids)
     # Model prose cannot replace source/selection facts, scope or next actions.
     prose = json.dumps([report["representative"],report["limitations"],report["methods_relations"]],ensure_ascii=False)

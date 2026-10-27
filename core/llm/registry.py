@@ -31,6 +31,7 @@ from core.llm.base import (
     StructuredOutputRequest,
 )
 from core.llm.task_router import TaskRouter
+from core.llm.public_errors import public_error
 from core.invocation_audit import audited_model, span
 
 T = TypeVar("T", bound=BaseModel)
@@ -63,10 +64,10 @@ class LLMRegistry:
 
         providers: dict[str, LLMProvider] = {}
 
-        # 尝试注册 OpenAI（含兼容协议的本地模型）
+        # 官方 OpenAI 与本地兼容服务分别注册，不能因本地地址而初始化官方客户端。
         openai_key = os.environ.get(config.llm.openai_api_key_env)
         local_url = os.environ.get(config.llm.local_model_base_url_env)
-        if openai_key or local_url:
+        if openai_key:
             from core.llm.providers.openai_provider import OpenAIProvider
 
             providers["openai"] = OpenAIProvider(
@@ -275,7 +276,7 @@ class LLMRegistry:
                 raise
             logger.warning(
                 "structured_output 首次失败（%s），追加实例提示重试一次",
-                err_msg[:120],
+                public_error(e),
             )
             # 在 prompt 末尾追加强提示
             reminder = (

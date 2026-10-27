@@ -84,6 +84,7 @@ _cmp_work/
 # 本地审查与临时测试目录，不属于源码发行内容
 .pytest-*/
 .pytest*/
+tmp/pdfs/
 .workbuddy/
 .trae-html-share-packages/
 pytest_report.xml

@@ -29,7 +29,7 @@ from core.workspace.schema import (
 from core.workspace.service import KEY, RevisionConflict, WorkspaceError
 from core.workspace.start import ConversationStarter, StartConversation
 from core.workspace.teaching_packages import load_package, plan_for, NOTICE
-from core.workspace.plans import render_plan, validate_plan
+from core.workspace.plans import render_plan, validate_plan, export_plan_content
 
 CASE_KEY = "teaching.case.v1"
 
@@ -77,7 +77,7 @@ def guard_teaching(chat):
         )
 
 
-def export_header(chat):
+def export_header(chat, *, compact=False):
     state = teaching_identity(chat)
     if not state:
         return ""
@@ -86,10 +86,12 @@ def export_header(chat):
         "\n\n".join(
             [
                 NOTICE,
-                f"案例 {p['case_id']} · 版本 {p['version']} · 整理 {p['organized_on']}",
+                f"案例 {p['title']} · 版本 {p['version']} · 整理 {p['organized_on']}",
                 p["settings"],
-                "待讨论：" + "；".join(p["unconfirmed"]),
-                "来源：" + "；".join(s["title"] + " " + s["url"] for s in p["sources"]),
+                *([] if compact else [
+                    "待讨论：" + "；".join(p["unconfirmed"]),
+                    "来源：" + "；".join(s["title"] + " " + s["url"] for s in p["sources"]),
+                ]),
             ]
         )
         + "\n\n"
@@ -631,23 +633,23 @@ class TeachingService:
         lines = [
             "# " + p["title"],
             NOTICE,
-            f"案例 {p['case_id']} · 版本 {p['version']} · 整理日期 {p['organized_on']}",
-            "内容指纹：" + state["fingerprint"],
+            f"案例 {p['title']} · 版本 {p['version']} · 整理日期 {p['organized_on']}",
             p["settings"],
             "## 已明确采纳的教学记录",
         ]
+        labels = {state["paper_map"][s["source_id"]]: str(n) for n, s in enumerate(p["sources"], 1)}
         for i in w.items:
             if i.kind in ("question", "plan"):
                 lines += [
-                    f"### {i.title} · 版本 {i.plan_version or '问题记录'} · {i.status} · 待复核 {i.needs_review}",
-                    i.content,
+                    f"### {i.title} · 版本 {i.plan_version or '问题记录'} · {'当前记录' if i.status == 'active' else '历史记录'} · {'待复核' if i.needs_review else '未发现资料变更'}",
+                    export_plan_content(i, labels),
                 ]
         if not any(i.kind in ("question", "plan") for i in w.items):
             lines += ["尚未明确采纳问题或方案；不会把预置分支当作已完成产物。"]
         lines += ["## 来源与阅读范围"]
-        for s in p["sources"]:
+        for n, s in enumerate(p["sources"], 1):
             lines += [
-                f"- {s['title']} ({s['year']})；{'、'.join(s['authors'])}；{s['url']}；DOI {s.get('doi') or '未分配/未使用'}；核验 {s['verified_on']}；阅读范围 {s['reading_scope']}；项目材料 {state['paper_map'][s['source_id']]}",
+                f"- [{n}] {s['title']} ({s['year']})；{'、'.join(s['authors'])}；{s['url']}；DOI {s.get('doi') or '未分配/未使用'}；核验 {s['verified_on']}；阅读范围 {s['reading_scope']}",
                 s["summary"],
                 "出处：" + "；".join(f["location"] for f in s["facts"]),
             ]

@@ -19,6 +19,7 @@ from core.research_tasks.service import (
     TaskConflict,
     TaskError,
     TaskNotFound,
+    STATUS_LABELS,
 )
 from core.research_tasks.synthesis import report_markdown
 from core.research_tasks.detect import SearchIntent
@@ -142,27 +143,32 @@ def build_research_task_router(config, require_project, task_factory):
             fail(exc)
         content = None
         if version is not None:
-            entry = next(
-                (v for v in (view.get("report_versions") or []) if v.get("version") == version),
-                None,
-            )
-            if entry is None:
-                raise HTTPException(404, f"报告版本 v{version} 不存在")
+            try:
+                entry = service.report_version(task_id, version)
+            except WorkspaceError as exc:
+                fail(exc)
+            report = entry["report"]
+            coverage = report.get("coverage") or {}
+            saved_status = entry.get("status") or "unknown"
             # 历史版本按其交付时的状态渲染，不冒充当前状态。
             content = report_markdown(
                 {
                     "topic": view["topic"],
                     "task_id": task_id,
-                    "status": entry.get("status") or view["status"],
-                    "status_label": view["status_label"],
+                    "status": saved_status,
+                    "status_label": STATUS_LABELS.get(saved_status, "历史交付状态未记录"),
                     "year_label": view.get("year_label") or "未限定年份",
-                    "limits": view["limits"],
-                    "queries": view["queries"],
-                    "source_calls": view["source_calls"],
-                    "report": entry.get("report") or {},
-                    "report_versions": view.get("report_versions") or [],
+                    "limits": coverage.get("limits") or {},
+                    "queries": coverage.get("queries") or [],
+                    "source_calls": coverage.get("source_calls") or [],
+                    "report": report,
+                    "report_versions": [v for v in (view.get("report_versions") or []) if v.get("version", 0) <= version],
                 }
-            ) or None
+            )
+            note = f"> 报告版本 v{version}（已保存快照）；交付于 {entry.get('delivered_at') or '历史记录未提供时间'}。"
+            if not coverage:
+                note += " 该版本未保存查询及来源调用快照，未用当前任务明细代替。"
+            content = note + "\n\n" + content
         content = content or view.get("report_markdown") or (
             "任务尚未产出报告；当前状态：" + view["status_label"]
         )

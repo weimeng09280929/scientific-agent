@@ -163,6 +163,24 @@ def test_structured_output_raises_on_unknown_task(
         )
 
 
+def test_schema_repair_log_does_not_repeat_private_exception_text(mock_llm_registry, caplog):
+    calls = []
+
+    class RepairProvider(_MockLLMProvider):
+        def structured_output(self, request, model):
+            calls.append(request)
+            if len(calls) == 1:
+                raise LLMError("返回非合法 JSON：https://user:FAKE-PRIVATE-MARKER@example.invalid/private")
+            return _FakeSchema(name="repaired")
+
+    mock_llm_registry.register_provider("mock", RepairProvider())
+    result = mock_llm_registry.structured_output("test_task", _FakeSchema, prompt="repair fixture")
+    assert result.name == "repaired" and len(calls) == 2
+    assert "追加实例提示重试一次" in caplog.text
+    assert "FAKE-PRIVATE-MARKER" not in caplog.text
+    assert "example.invalid" not in caplog.text
+
+
 # ===== embed =====
 
 
@@ -215,6 +233,39 @@ def test_available_providers_returns_registered_names(
     """available_providers 应返回已注册的 provider 名列表。"""
     providers = mock_llm_registry.available_providers()
     assert "mock" in providers
+
+
+@pytest.mark.parametrize("official_key", [None, "test-official-key"])
+def test_local_service_does_not_require_official_openai_key(
+    monkeypatch, tmp_project_paths, mock_tasks_yaml, official_key
+):
+    """A local-only setup must never initialize the unrelated official client."""
+    from core.config import GlobalConfig, LLMConfig
+    from core.llm.providers import openai_provider
+
+    config = GlobalConfig(paths=tmp_project_paths, llm=LLMConfig(tasks_config_path=mock_tasks_yaml))
+    for attribute in (
+        "openai_api_key_env", "anthropic_api_key_env", "minimax_api_key_env",
+        "mimo_api_key_env", "deepseek_api_key_env", "spark_api_key_env",
+        "siliconflow_api_key_env",
+    ):
+        monkeypatch.delenv(getattr(config.llm, attribute), raising=False)
+    monkeypatch.setenv(config.llm.local_model_base_url_env, "http://127.0.0.1:9999/v1")
+    if official_key:
+        monkeypatch.setenv(config.llm.openai_api_key_env, official_key)
+    created = []
+
+    def provider(**kwargs):
+        created.append(kwargs)
+        assert kwargs["api_key"]
+        return _MockLLMProvider()
+
+    monkeypatch.setattr(openai_provider, "OpenAIProvider", provider)
+    registry = LLMRegistry.from_config(config)
+    assert set(registry.available_providers()) == ({"openai", "local"} if official_key else {"local"})
+    local = next(item for item in created if item["base_url"] is not None)
+    assert local["base_url"] == "http://127.0.0.1:9999/v1"
+    assert local["api_key"] == (official_key or "EMPTY")
 
 
 # ===== 多 provider 路由 =====

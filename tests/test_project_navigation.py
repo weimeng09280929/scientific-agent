@@ -497,9 +497,10 @@ def test_method_group_link_selects_actual_version_and_upstream_review(navigation
     text = n.client.get(entries["artifact:method-2"]["url"]).text
     assert (
         "原始方法 v2" in text
-        and "rules_demo_fixture" in text
+        and "演示（未验证）" in text
         and "已关联当前方案" in text
     )
+    assert "rules_demo_fixture" not in text
     assert tree(n.root) == before
     s.store.save_artifact(
         Artifact(

@@ -15,6 +15,7 @@ import logging
 import re
 
 from core.research_tasks.limits import SearchLimits
+from core.llm.public_errors import fallback_note, public_error
 
 logger = logging.getLogger(__name__)
 
@@ -102,12 +103,12 @@ def rank_candidates(
             ranked.sort(key=lambda c: c["relevance_score"], reverse=True)
             return ranked[: limits.max_candidates], "model", ""
         except Exception as exc:  # 模型链路任何失败（路由缺失/截断/网络）都明确降级
-            logger.warning("候选筛选模型输出不可用，回退规则筛选: %s", exc)
+            logger.warning("候选筛选模型输出不可用，回退规则筛选: %s", public_error(exc))
             ranked = _rule_rank(candidates, topic_terms, limits)
             return (
                 ranked,
                 "rules",
-                f"模型筛选失败，已回退规则筛选（{type(exc).__name__}: {str(exc)[:120]}）",
+                fallback_note("ranking", exc),
             )
     return _rule_rank(candidates, topic_terms, limits), "rules", ""
 

@@ -559,15 +559,24 @@ def test_retry_does_not_duplicate_materials_or_messages(rt):
 
 
 def test_same_project_race_controlled_cross_project_isolated(rt):
-    rt.control.default = lambda name, query, seq: [
-        make_paper(seq, query, doi=f"10.1/r{seq}")
-    ]
+    entered, release = threading.Event(), threading.Event()
+
+    def blocked_source(name, query, seq):
+        entered.set()
+        if not release.wait(timeout=10):
+            raise TimeoutError("offline fixture was not released")
+        return [make_paper(seq, query, doi=f"10.1/r{seq}")]
+
+    rt.control.default = blocked_source
     cid1 = create(rt)
     cid2 = create(rt)
     body1 = start_via_message(rt, cid1, rid="m1")
-    # 同项目第二个任务被明确拒绝
-    r = send(rt, cid2, "帮我查一下另一个方向的论文", rid="m1")
-    assert r.status_code == 409
+    try:
+        assert entered.wait(timeout=5), "首个任务必须正在执行，才验证同项目冲突"
+        r = send(rt, cid2, "帮我查一下另一个方向的论文", rid="m1")
+        assert r.status_code == 409
+    finally:
+        release.set()
     state1 = wait_terminal(rt, "p1", cid1, body1["task_id"])
     assert state1["status"] in ("completed", "partial")
     # 不同项目可以各自检索，数据隔离
@@ -1004,18 +1013,32 @@ def test_concurrent_resume_clicks_single_execution(rt):
     assert view["status"] == "partial"
     attempts_before = view["attempts"]
     rt.control.script = []
-    rt.control.default = lambda name, query, seq: []
+    entered, release = threading.Event(), threading.Event()
+    ready = threading.Barrier(3)
+
+    def blocked_resume(name, query, seq):
+        entered.set()
+        if not release.wait(timeout=10):
+            raise TimeoutError("offline resume fixture was not released")
+        return []
+
+    rt.control.default = blocked_resume
 
     def click():
+        ready.wait(timeout=5)
         return rt.client.post(
             f"/api/projects/p1/conversations/{cid}/research-tasks/{body['task_id']}/retry",
             json={"resume": True},
         )
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        results = list(pool.map(lambda _: click(), range(3)))
-    codes = [r.status_code for r in results]
-    assert any(c == 200 for c in codes), codes
+    try:
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(lambda _: click(), range(3)))
+        assert entered.wait(timeout=5)
+        codes = [r.status_code for r in results]
+        assert codes.count(200) == 1 and codes.count(409) == 2, codes
+    finally:
+        release.set()
     done = wait_terminal(rt, "p1", cid, body["task_id"])
     assert done["attempts"] == attempts_before + 1, "并发补跑只允许一次执行"
 

@@ -20,6 +20,9 @@ def serve(root, port):
     cfg = configuration.GlobalConfig(
         paths=configuration.ProjectPaths.from_root(root), dry_run=False
     )
+    # This key is only a readiness fixture; SDK calls still use MockTransport.
+    cfg.llm.deepseek_api_key_env = "SRA_WORKFLOW_FIXTURE_KEY"
+    os.environ["SRA_WORKFLOW_FIXTURE_KEY"] = "offline-fixture-not-a-secret"
     cfg.llm.max_retries = 0
     configuration._default_config = cfg
     from web import api

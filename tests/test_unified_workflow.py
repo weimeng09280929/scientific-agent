@@ -208,7 +208,8 @@ def test_guide_and_export_use_same_persisted_mainline(unified):
     assert context["research_mainline"]["focus"]==s.load().focus.model_dump()
     assert context["research_mainline"]["next_step"]["action"]=="plan_ready"
     body=client.get(f"/api/projects/{s.project_id}/download/full-report").text
-    assert q.item_id in body and p.item_id in body and "来源材料" in body
+    assert q.title in body and p.title in body and "来源材料" in body
+    assert q.item_id not in body and p.item_id not in body
 
 
 def test_actual_worker_and_human_gate_override_manual_record_action(unified):

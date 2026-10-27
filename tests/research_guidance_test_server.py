@@ -16,8 +16,23 @@ def build(temporary):
     from tests.conversation_home_test_server import build as base_build
 
     app = base_build(temporary)
-    from web import workspace_api
+    from web import api, workspace_api
     from core.workspace.schema import GuideDraft, ReplyOption
+
+    # Configuration inspection must use fixture credentials, never the user's.
+    api._CONFIG.llm.deepseek_api_key_env = "SRA_GUIDANCE_FIXTURE_KEY"
+    os.environ["SRA_GUIDANCE_FIXTURE_KEY"] = "offline-fixture-not-a-secret"
+
+    import requests
+    import httpx
+    import httpx2
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Unexpected external I/O in isolated guidance acceptance")
+
+    requests.sessions.Session.request = forbidden
+    httpx.HTTPTransport.handle_request = forbidden
+    httpx2.HTTPTransport.handle_request = forbidden
 
     original = workspace_api.generate_guidance
     calls = []

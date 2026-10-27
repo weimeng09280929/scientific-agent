@@ -3,7 +3,6 @@
 from pathlib import Path
 from contextlib import closing
 import sqlite3
-import re
 from urllib.parse import quote
 from typing import Annotated, Literal
 
@@ -12,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 from core.knowledge.store import StoreError
 from core.workspace.service import WorkspaceService, WorkspaceError
 from core.workspace.conversations import ConversationService, ConversationNotFound
-from core.workspace.plans import METHODS
+from core.workspace.plans import METHODS, export_plan_content
 
 
 def artifact_text(artifact, root):
@@ -412,19 +411,29 @@ def build_exports_router(
             if is_current and flow.get("planReady")
             else "待复核／未选为有效当前方案" if is_current else "历史／其他研究记录"
         )
-        content = f"# {item.title}\n\n项目：{project_id}\n\n记录：{item.item_id} · 材料版本：{w.revision}\n\n状态：{status}；{item.status}；需要复核：{item.needs_review}\n\n> 方案保存不代表实验已执行或结论得到验证。原文中的草稿、教学、预期与历史标记均保留。\n\n{item.content}\n\n关联记录：{'、'.join(item.related_ids)}\n\n引用论文：{'、'.join(item.paper_ids)}"
+        papers = {p.paper_id: p for p in service_papers(project_id)}
+        labels = {pid: str(n) for n, pid in enumerate(item.paper_ids, 1)}
+        body = export_plan_content(item, labels)
+        content = f"# {item.title}\n\n状态：{status}；{'待复核' if item.needs_review else '未发现已标记的资料变更'}\n\n"
         if item.kind == "plan":
-            content = plan_identity(state, w, item) + "\n\n" + content
-        if item.source_ref:
-            content += "\n\n来源：" + item.source_ref.model_dump_json()
+            content += plan_identity(state, w, item) + "\n\n"
+        else:
+            content += f"项目名称：{getattr(state, 'display_name', '') or state.topic}\n\n"
+            related = [i.title for i in w.items if i.item_id in item.related_ids]
+            if related:
+                content += "关联记录：" + "；".join(related) + "\n\n"
+        content += "> 保存不代表实验已执行或结论得到验证。原文中的草稿、教学、预期与历史标记均保留。\n\n"
         from core.workspace.teaching import export_header
 
-        content = (
-            export_header(ConversationService(project_id, service.db_path)) + content
-        )
+        content += export_header(ConversationService(project_id, service.db_path), compact=item.kind == "plan") + body
+        content += reference_list(item, papers)
+        if item.kind == "plan":
+            content += "\n\n" + plan_review(state, item)
+        if item.source_ref:
+            content += "\n\n来源：已关联的项目资料；保留原始记录状态。"
         return render(
             content,
-            "record-" + re.sub(r"[^A-Za-z0-9_-]", "_", item.item_id)[:100],
+            f"research-plan-v{item.plan_version or 'legacy'}" if item.kind == "plan" else "research-record",
             format,
         )
 
@@ -438,19 +447,29 @@ def build_exports_router(
         text = f"项目名称：{name}\n\n研究问题：" + "；".join(
             q.title + "：" + q.content for q in questions
         )
-        text += f"\n\n方案类型：{METHODS[item.plan.method] if item.plan else '历史未标注'}；版本：{item.plan_version if item.plan_version is not None else '讨论稿，尚无正式版本' if draft else '历史未标版'}；修订自：{item.supersedes_id or '无'}"
+        previous = next((i for i in workspace.items if i.item_id == item.supersedes_id), None)
+        previous_label = (f"{previous.title}（版本 {previous.plan_version or '历史未标版'}）" if previous
+                          else "历史方案（关联记录已不可用）" if item.supersedes_id else "无")
+        text += f"\n\n方案类型：{METHODS[item.plan.method] if item.plan else '历史未标注'}；版本：{item.plan_version if item.plan_version is not None else '讨论稿，尚无正式版本' if draft else '历史未标版'}；修订自：{previous_label}"
         if item.plan:
-            text += (
-                f"\n\n模板版本：{item.plan.template_version}\n\n待确认："
-                + "；".join(item.plan.unconfirmed)
-            )
-        papers = {p.paper_id: p for p in service_papers(state.project_id)}
-        for pid in item.paper_ids:
-            p = papers.get(pid)
-            text += "\n\n参考来源：" + (
-                f"{p.title} ({pid})；DOI：{p.doi or '无'}" if p else pid
-            )
+            text += "\n\n待确认：" + "；".join(item.plan.unconfirmed)
         return text
+
+    def reference_list(item, papers):
+        if not item.paper_ids:
+            return ""
+        lines = ["\n\n## 参考文献"]
+        for n, pid in enumerate(item.paper_ids, 1):
+            p = papers.get(pid)
+            lines.append(f"[{n}] {p.title}；DOI：{p.doi or '未提供'}" + (f"；来源链接：{p.url}" if p.url else "") if p else f"[{n}] 来源未找到，请核对项目资料。")
+        return "\n\n".join(lines)
+
+    def plan_review(state, item):
+        from core.workspace.plan_quality import render_quality
+
+        service = read(state.project_id)[2]
+        quality = service.plan_quality(item, needs_review=getattr(item, "needs_review", False))
+        return render_quality(quality)
 
     def service_papers(pid):
         return read(pid)[2].store.list_papers()
@@ -497,24 +516,23 @@ def build_exports_router(
             }
         )
         item = WorkItem(**data.model_dump())
+        item.needs_review = bool(s.get("basis_changed", True))
         w = service.load(include_chat=False)
         status = (
             "已采纳的原始草案（请在正式记录查看版本）"
             if s.get("applied_item_id")
             else "未采纳讨论稿，非当前正式方案"
         )
-        content = (
-            f"# {s['title']}\n\n状态：{status}；依据待复核：{s.get('basis_changed',True)}\n\n"
-            + plan_identity(state, w, item, draft=True)
-            + "\n\n"
-            + s["content"]
-        )
+        content = f"# {s['title']}\n\n状态：{status}；依据{'待复核' if s.get('basis_changed', True) else '未发现变更'}\n\n" + plan_identity(state, w, item, draft=True) + "\n\n"
         from core.workspace.teaching import export_header
 
-        content = export_header(chat) + content
+        labels = {pid: str(n) for n, pid in enumerate(item.paper_ids, 1)}
+        papers = {p.paper_id: p for p in service_papers(project_id)}
+        content += export_header(chat, compact=True) + export_plan_content(item, labels)
+        content += reference_list(item, papers) + "\n\n" + plan_review(state, item)
         return render(
             content,
-            "draft-" + re.sub(r"[^A-Za-z0-9_-]", "_", suggestion_id)[:100],
+            "research-plan-draft",
             format,
         )
 
@@ -540,12 +558,12 @@ def build_exports_router(
             raise HTTPException(
                 404, "产物版本已不可读取，请刷新目录后核对；未生成替代文档"
             )
-        content = f"# 导出说明\n\n项目：{project_id}\n\n{artifact.title} · v{artifact.version} · {artifact.artifact_group}\n\n状态：{entry['status_label']} · {entry['label']}\n\n原始来源：{artifact.source_stage} / {artifact.created_by} · {artifact.created_at.isoformat()}\n\n> 保留原文状态，不代表新实验或已验证结论。\n\n---\n\n{text}"
+        state = read(project_id)[1]
+        origin = "规则或离线演示（未验证）" if any(marker in (artifact.created_by or "").lower() for marker in ("rules", "demo", "fixture", "simulat")) else "项目原始文档（未经独立验证）"
+        content = f"# {artifact.title}\n\n项目名称：{getattr(state, 'display_name', '') or state.topic}\n\n版本：{artifact.version}\n\n状态：{entry['status_label']} · {entry['label']}\n\n来源说明：{origin}\n\n创建时间：{artifact.created_at.isoformat()}\n\n> 保留原文状态，不代表新实验或已验证结论。\n\n---\n\n{text}"
         return render(
             content,
-            "artifact-"
-            + re.sub(r"[^A-Za-z0-9_-]", "_", artifact.artifact_id)[:100]
-            + f"-v{artifact.version}",
+            f"research-report-v{artifact.version}",
             format,
         )
 

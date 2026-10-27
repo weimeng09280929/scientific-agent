@@ -336,9 +336,12 @@ def validate_plan(plan: ResearchPlan, context, text):
             raise WorkspaceError("当前仅实验研究设计，不提供具体设备或危险操作步骤")
 
 
-def render_plan(plan: ResearchPlan):
+def render_plan(plan: ResearchPlan, reference_labels: dict[str, str] | None = None):
+    def reference_label(pid):
+        return reference_labels.get(pid, "来源待核对") if reference_labels is not None else pid
+
     out = [
-        f"**方案类型：{METHODS[plan.method]} · 模板 {plan.template_version}**",
+        f"**方案类型：{METHODS[plan.method]}" + (f" · 模板 {plan.template_version}" if reference_labels is None else "") + "**",
         "",
         "> 研究方案建议，尚未执行。结构完整不等于科学有效；采纳状态见记录标记。",
     ]
@@ -348,7 +351,7 @@ def render_plan(plan: ResearchPlan):
         for s in section.statements:
             out += [
                 f"- 【{BASES[s.basis]}】{s.text}"
-                + (" [" + ", ".join(s.paper_ids) + "]" if s.paper_ids else "")
+                + (" [" + ", ".join(reference_label(pid) for pid in s.paper_ids) + "]" if s.paper_ids else "")
             ]
             if s.quote:
                 out += ["> 依据原文：" + s.quote.replace("\n", " ")]
@@ -371,10 +374,17 @@ def render_plan(plan: ResearchPlan):
         "## 待讨论事项",
         *["- " + s for s in plan.unconfirmed],
         "",
-        "参考论文 ID："
-        + (", ".join(plan.references) or "尚无可核验内容依据，需补充资料"),
+        ("参考资料：" if reference_labels is not None else "参考论文 ID：")
+        + (", ".join(reference_label(pid) for pid in plan.references) or "尚无可核验内容依据，需补充资料"),
     ]
     return "\n\n".join(out)
+
+
+def export_plan_content(item, reference_labels):
+    """Relabel generated annotations only; keep custom text and saved records intact."""
+    if item.plan is None:
+        return item.content
+    return item.content.replace(render_plan(item.plan), render_plan(item.plan, reference_labels), 1)
 
 
 def prepare_plan(draft, context, text):

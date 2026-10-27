@@ -11,6 +11,7 @@ import re
 import logging
 
 from core.research_tasks.limits import SearchLimits
+from core.llm.public_errors import fallback_note, public_error
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +81,10 @@ def plan_queries(
                 return planned, "model", ""
             return _rule_queries(topic, request_text, limits), "rules", "模型规划输出为空"
         except Exception as exc:  # 模型链路任何失败（路由缺失/截断/网络）都明确降级
-            logger.warning("查询规划模型输出不可用，回退规则规划: %s", exc)
+            logger.warning("查询规划模型输出不可用，回退规则规划: %s", public_error(exc))
             return (
                 _rule_queries(topic, request_text, limits),
                 "rules",
-                f"模型规划失败，已回退规则规划（{type(exc).__name__}: {str(exc)[:120]}）",
+                fallback_note("planning", exc),
             )
     return _rule_queries(topic, request_text, limits), "rules", ""

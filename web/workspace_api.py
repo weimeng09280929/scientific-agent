@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import Field
 
 from core.llm import LLMRegistry
 from core.knowledge.schema import ArtifactType
+from core.knowledge.store import StoreError
 from core.workspace.guide import (
     STARTERS,
     build_guide_context,
@@ -32,6 +34,7 @@ from core.research_tasks.service import ResearchTaskService, SearchTaskRequest
 from core.research_tasks.detect import classify_search_request
 from web.research_task_api import build_research_task_router
 from web.conversation_api import build_conversation_router, result_response
+from core.workspace.plan_quality import PlanQualityReport
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +228,32 @@ def build_workspace_router(
     def get_workspace(project_id: str, include_chat: bool = True):
         service, project = service_for(project_id)
         return view(service, project, include_chat=include_chat)
+
+    @router.get("/{project_id}/workspace/plan-quality", response_model=PlanQualityReport)
+    def plan_quality(
+        project_id: str,
+        item_id: str | None = Query(default=None, min_length=1, max_length=200),
+        conversation_id: str | None = Query(default=None, min_length=1, max_length=200),
+        suggestion_id: str | None = Query(default=None, min_length=1, max_length=200),
+    ):
+        if (item_id is None) == (suggestion_id is None) or bool(conversation_id) != bool(suggestion_id):
+            raise HTTPException(422, "请指定一份正式方案，或指定同一会话中的方案草案")
+        try:
+            service, _ = service_for(project_id)
+            if item_id:
+                item = next((i for i in service.load(include_chat=False).items if i.item_id == item_id and i.kind == "plan"), None)
+                if item is None:
+                    raise ConversationNotFound("方案不存在或不属于当前项目")
+                return service.plan_quality(item)
+            chat = ConversationService(project_id, service.db_path)
+            draft = next((s for s in chat.suggestions(conversation_id) if s["suggestion_id"] == suggestion_id and s["kind"] == "plan"), None)
+            if draft is None:
+                raise ConversationNotFound("方案草案不存在或不属于当前会话")
+            return service.plan_quality(draft, needs_review=bool(draft.get("basis_changed", True)))
+        except (WorkspaceError, ConversationNotFound, ConversationStorageError) as exc:
+            fail(exc)
+        except (StoreError, sqlite3.Error) as exc:
+            raise HTTPException(503, "方案依据暂不可读取，原方案未改写，请核对资料后重试") from exc
 
     @router.get("/{project_id}/research-materials")
     def research_materials(project_id: str):

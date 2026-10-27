@@ -13,6 +13,7 @@ const shots=path.resolve(process.env.SRA_ACCEPTANCE_SHOTS || 'docs/research-guid
   const state=async()=> (await (await api.get(base+'/__guidance__/state')).json());
   const fixture=await (await api.get(base+'/__fixture__/state')).json(),pid=fixture.project_id;
   const rows=async(cid)=> (await (await api.get(`${base}/api/projects/${pid}/conversations/${cid}/messages?tail=true&limit=100`)).json()).messages;
+  const suggestions=async(cid)=>(await (await api.get(`${base}/api/projects/${pid}/conversations/${cid}/suggestions?recent=true`)).json()).suggestions;
   const create=async(title,entry_stage='design')=>(await (await api.post(`${base}/api/projects/${pid}/conversations`,{data:{title,entry_stage,guidance_mode:'direct'}})).json()).conversation.conversation_id;
   const ready=async()=>{await page.locator('[data-ref="send"]').waitFor();await page.waitForFunction(()=>!document.querySelector('[data-ref="send"]').disabled);};
   const route=async(cid=null)=>{await page.goto(`${base}/workspace?page=dashboard&project=${pid}${cid ? '&conversation='+cid : ''}`);await ready();};
@@ -22,32 +23,38 @@ const shots=path.resolve(process.env.SRA_ACCEPTANCE_SHOTS || 'docs/research-guid
   try{
     const before=(await state()).calls.length;
     await page.goto(base+'/');await ready();
-    assert.match(await page.locator('[data-ref="welcome"]').innerText(),/你好，我会和你一起/);
-    for(const [i,mode,stage] of [[0,'beginner','orientation'],[1,'direct','literature'],[2,'direct','design']]){
+    assert.match(await page.locator('[data-ref="welcome"]').innerText(),/从你现在的研究进度开始/);
+    assert.equal(await page.locator('[data-entry]').count(),4);
+    for(const [i,mode,stage] of [[0,'beginner','orientation'],[1,'direct','literature'],[3,'direct','literature'],[2,'direct','question']]){
       await page.locator(`[data-entry="${i}"]`).click();
       assert.equal(await page.locator('[data-ref="mode"]').inputValue(),mode);
       assert.equal(await page.locator('[data-ref="stage"]').inputValue(),stage);
+      assert.equal(await page.locator(`[data-entry="${i}"]`).getAttribute('aria-pressed'),'true');
+      assert.match(await page.locator('[data-ref="entryOutcome"]').innerText(),/这次可以得到/);
+      assert.equal(await page.locator('[data-ref="entryUpload"]').isVisible(),i===3);
     }
     assert.equal((await state()).calls.length,before);
     await page.screenshot({path:path.join(shots,'opening-desktop.png')});
     await route();
-    assert.match(await page.locator('[data-ref="summaryText"]').innerText(),/已有研究问题/);
-    assert.match(await page.locator('[data-ref="summaryText"]').innerText(),/无需重填/);
+    assert.match(await page.locator('[data-ref="summaryText"]').innerText(),/已确认问题：|待复核问题：/);
     assert.equal((await state()).calls.length,before);
     await page.screenshot({path:path.join(shots,'project-opening-desktop.png')});
     const cid=await create('推荐与操作验收');
     await route(cid);await send('GUIDANCE_PLAN 请生成计算研究方案，核对已有方案');
     let m=(await rows(cid)).at(-1);
     const snapshot=JSON.stringify([m.suggested_replies,m.actions]);
-    assert.equal(m.suggested_replies.length,2);assert.equal(m.actions.length,2);
-    await page.locator('.ch-action-card[data-action-type="adopt_suggestion"]').waitFor();
+    assert.equal(m.suggested_replies.length,2);assert.deepEqual(m.actions,[]);
+    const draft=(await suggestions(cid)).find(s=>s.kind==='plan'&&!s.applied_item_id);
+    assert.ok(draft);
+    await page.locator(`[data-plan-preview-id="${draft.suggestion_id}"]`).waitFor();
     await page.screenshot({path:path.join(shots,'reply-actions-desktop.png')});await overflow();
     const calls=(await state()).calls.length;
     await page.reload();await ready();
     assert.equal(JSON.stringify([(await rows(cid)).at(-1).suggested_replies,(await rows(cid)).at(-1).actions]),snapshot);
     assert.equal((await state()).calls.length,calls);
     assert.equal(await page.locator('[data-ref="welcome"]').isVisible(),false);
-    assert.equal(await page.locator('[data-ref="continueHint"]').isVisible(),true);
+    assert.equal(await page.locator('[data-ref="continueHint"]').isVisible(),false);
+    assert.equal(await page.locator('.ch-journey-next').isVisible(),true);
     // A recommendation cannot destroy a pending input. Cancel, then explicitly
     // send the recommendation while preserving the original draft.
     await page.locator('#ch-input').fill('保留这段尚未发送的草稿');
@@ -65,25 +72,29 @@ const shots=path.resolve(process.env.SRA_ACCEPTANCE_SHOTS || 'docs/research-guid
     const selected=await page.locator('.ch-reply-option').last().getAttribute('title');
     await page.locator('.ch-reply-option').last().evaluate(b=>{b.click();b.click();});await complete();
     assert.equal((await rows(cid)).filter(r=>r.role==='user' && r.content===selected).length,1);
-    // Real explicit adoption, not an assistant statement or a chat POST.
+    // Structured plans are reviewed before explicit adoption; model replies do
+    // not need an additional adopt_suggestion action card.
     const adoptedBefore=(await state()).calls.length;
-    await page.locator('.ch-action-card[data-action-type="adopt_suggestion"]').click();
-    await page.getByText('已采纳到研究记录，不表示结论得到验证，也未启动研究。',{exact:true}).waitFor();
+    await page.locator(`[data-plan-preview-id="${draft.suggestion_id}"]`).getByRole('button',{name:'打开方案',exact:true}).click();
+    await page.locator(`.ch-plan-review[data-plan-id="${draft.suggestion_id}"]`).getByRole('button',{name:'采纳方案',exact:true}).click();
+    await page.getByText('已采纳到研究记录，可继续审阅；不表示结论得到验证。',{exact:true}).waitFor();
     assert.equal((await state()).calls.length,adoptedBefore);
-    assert.equal(await page.locator('.ch-action-card[data-action-type="adopt_suggestion"]').isDisabled(),true);
+    assert.ok((await suggestions(cid)).find(s=>s.suggestion_id===draft.suggestion_id).applied_item_id);
     // A separate valid draft becomes stale through an excerpt change, without
     // touching Workspace.revision; live cards must disable on materials refresh.
     const stale=await create('片段变化验收');await route(stale);await send('GUIDANCE_PLAN 请生成计算研究方案，片段变化前');
+    const staleDraft=(await suggestions(stale)).find(s=>s.kind==='plan'&&!s.applied_item_id);
+    await page.locator(`[data-plan-preview-id="${staleDraft.suggestion_id}"]`).getByRole('button',{name:'打开方案',exact:true}).click();
     await api.post(base+'/__fixture__/excerpt');
-    await page.locator('[data-ref="panelToggle"]').click();
     await page.getByRole('button',{name:'刷新材料与草案',exact:true}).click();
-    await page.waitForFunction(()=>document.querySelector('[data-action-type="adopt_suggestion"]')?.disabled);
+    const staleAdoption=page.locator(`.ch-plan-review[data-plan-id="${staleDraft.suggestion_id}"]`).getByRole('button',{name:'依据待复核，不能直接采纳',exact:true});
+    await staleAdoption.waitFor();assert.equal(await staleAdoption.isDisabled(),true);
     await page.locator('[data-ref="panelClose"]').click();
-    assert.match(await page.locator('.ch-action-options').innerText(),/复核/);
+    assert.match(await page.locator(`[data-plan-preview-id="${staleDraft.suggestion_id}"]`).innerText(),/依据待复核/);
     await page.setViewportSize({width:390,height:844});
     await page.locator('[data-ref="messages"]').evaluate(n=>{n.scrollTop=n.scrollHeight;});
     await page.screenshot({path:path.join(shots,'reply-actions-mobile.png')});await overflow();
-    const staleCard=await page.locator('[data-action-type="adopt_suggestion"]').boundingBox(),composeBox=await page.locator('[data-ref="form"]').boundingBox();assert.ok(staleCard.y+staleCard.height<=composeBox.y);
+    const staleCard=await page.locator(`[data-plan-preview-id="${staleDraft.suggestion_id}"]`).boundingBox(),composeBox=await page.locator('[data-ref="form"]').boundingBox();assert.ok(staleCard.y+staleCard.height<=composeBox.y);
     const composer=await page.locator('[data-ref="send"]').boundingBox();assert.ok(composer && composer.y+composer.height<=844);
     // Only persisted whitelisted navigation, no generation from viewing.
     const settings=await create('设置卡片验收');await route(settings);await send('GUIDANCE_SETTINGS');

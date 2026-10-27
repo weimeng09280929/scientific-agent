@@ -38,6 +38,35 @@ STARTERS = {
 }
 
 
+def discussion_step(context: dict, area: Area) -> str:
+    """Use the user's current task before an older conversation entry label."""
+    conversation = context.get("conversation", {})
+    selected = conversation.get("discussion_step") or context.get("research_route", {}).get("discussion_step")
+    if selected in ("conditions", "exploration", "reading", "synthesis", "question", "design"):
+        return selected
+    return {"orientation": "conditions", "literature": "reading", "question": "question", "design": "design"}.get(
+        conversation.get("entry_stage"), {"overview": "conditions", "literature": "reading", "question": "question", "study": "design"}.get(area, "conditions"))
+
+
+def journey_delivery(context: dict, area: Area) -> str:
+    task = {
+        "conditions": "用户从兴趣开始：先给两个贴近其兴趣、容易理解的切口，分别说明可以研究什么；只追问一个能帮助选择的问题，允许不确定。不要先索取设备、预算和完整条件表。",
+        "exploration": "用户已有方向：先围绕该方向比较两三个具体切口，交代各自要回答什么、适用条件和下一步要补的依据；先帮助取舍，不强制跳转检索，不把宽泛方向当正式问题。",
+        "reading": "用户有论文想先读懂：先用已提供摘要或片段回答这篇研究什么、关键思路是什么、与用户问题有什么关系，或比较最多两篇；展示真实题名并简短定位依据，不把任务退回关键词问卷。只有目录时说明暂不能分析内容，先接收已有摘要或文件。",
+        "synthesis": "用户想整理已有阅读：先给材料之间最有用的共同点、差异和一个待核实问题，优先复用已有报告和实际原文；不重复检索，不把未找到依据当成创新。",
+        "question": "用户带着研究问题：先整理出一句待用户确认的具体问题，说明保留了什么、还需澄清哪一个比较对象或判断标准；有明确内容可给未采纳的问题草案，不跳回从零选题，不自动确认问题。",
+        "design": "用户已有明确问题：直接围绕它比较方法路线，先说明最影响可行性的因素和一个可采取的下一步；复用已知条件，不要求重填背景。未明确采纳的问题先帮助确认，不把讨论当正式方案生成。",
+    }[discussion_step(context, area)]
+    if context.get("research_route", {}).get("step") == "review_basis":
+        task += " 当前问题或方案的依据已有变化，先帮助核对变化，再讨论修订，不将旧材料表述为当前有效依据。"
+    return (
+        "【本轮用户交付】" + task
+        + " 先给当前可获得的帮助，再给一个具体的下一步；短答不重复整套流程。"
+        "证据、条件和采纳检查仍须执行，但不要把 schema、revision、paper_id、审计或内部状态名写进普通回复；用题名和人能理解的说明表达。"
+        "新手先解释最影响理解的一个术语，直接模式省略已知背景。原文范围、未知条件和未验证设想如实说明，不夸大检索或专业评审；必要的限制放在对应判断旁边。"
+    )
+
+
 def build_guide_system(
     area: Area,
     domain: str = "",
@@ -69,6 +98,7 @@ def build_guide_system(
         "【研究论证】区分待检验设想、事实和最终结论；负面结果也不能被改写或伪造。本轮只讨论研究问题与方案，历史实验与写作仅供查看。",
         strategy(context or {}),
         COACH_POLICY,
+        journey_delivery(context or {}, area),
     ]
     if area in ("overview", "literature", "question"):
         parts.append(build_reading_hint(reading_purpose))
@@ -183,6 +213,7 @@ def build_guide_context(
         "revision": workspace.revision,
         "brief": workspace.brief.model_dump(),
         "selected_item_id": selected_item_id,
+        "selected_paper_ids": list(selected_paper_ids),
         "research_mainline": {
             "focus": mainline["focus"],
             "current_stage": mainline["current_stage"],
@@ -281,58 +312,95 @@ def rule_guidance(area: Area, text: str, context: dict) -> GuideDraft:
         from core.workspace.plans import rule_plan
 
         return rule_plan(context)
-    advice = {
-        "overview": "先记录研究目标、已有基础、设备与时间。范围过大时，先选择一个可检验的问题；需要资料的判断留待真实检索。",
-        "literature": "先说明这次阅读是了解方向、寻找基线还是理解方法。按 Why、What、How、结果、局限和与本研究的关系摘记，并定位原文。",
-        "question": "用一句话写清研究对象、比较条件和要观察的现象。与最接近论文逐项比较，未检索核实的差异先记为待核实。",
-        "study": "先确认问题，再审阅方案的数据条件、基线、预算、评价指标与可行性。本轮止于研究方案，可修改或导出供讨论，不安排实际执行或回填指标。",
-        "writing": "历史稿件可查看和导出；本轮止于研究方案，不新增论文、写作骨架或结果判断。",
-    }
-    missing = (
-        "当前尚无论文资料，不能判断研究空白。"
-        if not context["papers"]
-        else "当前提供的论文范围有限，不能据此断言领域无人研究。"
-    )
     if is_paused(text):
         return GuideDraft(
             reply="当前为规则指导，未调用模型。好的，先停在这里。已有对话和材料会保留。"
         )
-    beginner = context.get("conversation", {}).get("guidance_mode") == "beginner"
-    questions = []
-    if "两周" in text or "太难" in text:
+    conversation = context.get("conversation", {})
+    beginner = conversation.get("guidance_mode") == "beginner"
+    step = discussion_step(context, area)
+    if not conversation.get("discussion_step"):
+        if "现状" in text:
+            step = "reading"
+        elif "可行" in text:
+            step = "design"
+    papers = context.get("papers", [])
+    selected = set(context.get("selected_paper_ids", []))
+    candidates = [p for p in papers if p["paper_id"] in selected] if selected else papers
+    readable = [p for p in candidates if p.get("abstract", "").strip() or any(c.get("text", "").strip() for c in p.get("excerpts", []))]
+    questions, suggestions, cited = [], [], []
+    question_id = context.get("research_route", {}).get("question_id") or context.get("research_mainline", {}).get("focus", {}).get("question")
+    question = next((r for r in context.get("records", []) if r["kind"] == "question" and r["item_id"] == question_id), None)
+    if step in ("conditions", "exploration", "design") and ("两周" in text or "太难" in text):
         response = "可以先讨论将范围缩小为一个问题、一类数据或一种比较方法，再核对两周内是否能整理成方案。这只是本次讨论的条件，尚未修改正式项目目标或时间。"
-    elif beginner and "不确定" in text:
-        response = "不确定也没关系。可以先用一个熟悉的应用来理解研究，或只比较两种已有方法的局限，不必现在确定题目或资源。"
-    elif "没有做过科研" in text or (
-        beginner and area == "overview" and not context.get("brief", {}).get("goal")
-    ):
-        response = "不必先想出完整课题。先选一个容易理解的小问题，有助于知道接下来要读什么。可以从一个感兴趣的应用，或一个想理解的方法入手；不确定也没关系。"
-        questions = ["你想先聊一个应用，还是先了解一种方法？也可以说不确定。"]
-    elif "现状" in text or area == "literature":
-        response = (
-            "可以先明确要了解的对象、常见方法和比较维度。"
-            + missing
-            + "本次没有自动检索，不能据此声称已完成最新文献调研；可先讨论检索问题和关键词，或在文献资料页补充材料。"
-        )
-    elif "采用" in text or "采纳" in text:
-        plans = [
-            s for s in context.get("allowed_suggestions", []) if s["kind"] == "plan"
-        ]
+    elif re.search(r"(?:采用|采纳)(?:这个|该|此)?方案", text):
+        plans = [s for s in context.get("allowed_suggestions", []) if s["kind"] == "plan"]
         response = "文字确认不会自动保存。" + (
             "可核对下方具体方案草案后，点击采纳卡片。"
             if len(plans) == 1 and context.get("eligible_plan_count", len(plans)) == 1
             else "请先明确对应哪一条方案草案；有多个候选或依据变化时，需要先澄清或复核。"
         )
-    elif "可行" in text or area == "study":
-        response = (
-            "直接围绕已有问题核对方法是否能回答它，再区分已知资源、待确认条件和主要局限；不需要重新从零选题。"
-            + advice["study"]
-        )
+    elif area == "writing":
+        response = "历史稿件可查看和导出；本轮止于研究方案，不新增论文、写作骨架或结果判断。"
+    elif beginner and step == "conditions" and "不确定" in text:
+        response = "不确定也没关系。可以先用一个熟悉的应用来理解研究，或只比较两种已有方法的局限，不必现在确定题目或资源。"
+    elif step == "conditions" and ("没有做过科研" in text or (
+        beginner and not context.get("brief", {}).get("goal"))
+    ):
+        response = "不必先想出完整课题。可以选一种入手方式：从熟悉的应用出发，找一个想改善的问题；或从感兴趣的方法出发，看看它在什么情况下不够好。先选容易理解的一条，再逐步缩小，不必现在填完所有条件。"
+        questions = ["你想先聊一个应用，还是先了解一种方法？也可以说不确定。"]
+    elif step in ("reading", "synthesis"):
+        if readable:
+            extracts = []
+            for paper in readable[:2]:
+                excerpt = next((c["text"] for c in paper.get("excerpts", []) if c.get("text", "").strip()), None)
+                original = excerpt or paper.get("abstract", "")
+                sample = original[:220] + ("…（节选）" if len(original) > 220 else "")
+                scope = paper.get("scope") or "已有摘要或片段，未确认全文"
+                extracts.append(f"《{paper['title']}》\n阅读范围：{scope}\n已有内容节选：{sample}")
+                cited.append(paper["paper_id"])
+            response = ("先把已有材料放在一起看，暂不另起检索。" if step == "synthesis" else "先从你已有的材料读起，不必重新选题。")
+            response += "\n\n" + "\n\n".join(extracts)
+            response += "\n\n下一步先围绕这些资料核对研究对象、方法和适用条件，再讨论它与你的问题有什么关系。当前仅展示已有内容，未做模型分析，也未核对全文；本次没有自动检索。"
+        elif candidates:
+            response = "已看到" + "、".join("《" + p["title"] + "》" for p in candidates[:2]) + "，目前只有目录信息，不能据此解释方法或结果。请选中论文并补充已有摘要或文件，接下来就能围绕它读；不需要先重写研究方向。本次没有自动检索。"
+        else:
+            response = "可以直接从你关心的一篇论文开始：上传已有文件，或贴一段摘要，并说出最想弄清的一点。接下来先解释这篇研究什么、怎样做，再看与你的问题有什么关系。本次没有自动检索，也未读到论文内容。"
+    elif step in ("question", "design") and (
+        (question and question.get("needs_review"))
+        or context.get("research_route", {}).get("step") == "review_basis"
+    ):
+        response = "已有问题或方案的依据发生了变化。先核对变化对应的资料、比较条件和原有判断，再决定怎样修订；已有工作会保留，不必重新从零选题，也不会把旧依据当作已经确认的结论。"
+    elif step == "question":
+        if question:
+            response = f"已有研究问题是“{question['title']}”。这一轮先核对它的范围、比较对象和判断标准，保留你已经确认的部分；若只是检查可行性，可以沿着这个问题继续讨论方法，不必重新选题。"
+        else:
+            response = "先把你的想法整理成一句可讨论的问题：研究什么对象、比较什么差异、用什么现象判断。暂时不必写完整方案，也不必先填完设备和预算；这句话确认后，再比较适合的研究方法。"
+            proposed = re.search(r"(?:我的研究问题|研究问题|我的问题)(?:是|为)?[：:]\s*([^\n]+)", text)
+            if proposed and re.search(r"整理|明确|形成|改成|帮我", text):
+                candidate = re.split(r"[？?。]", proposed.group(1), maxsplit=1)[0].strip()
+                if len(candidate) >= 12 and not re.search(r"_{2,}|待填写|请填写|在此填写|你的问题|……|\.\.\.", candidate):
+                    suggestions = [SuggestedItem(kind="question", title=candidate[:100],
+                        content=candidate + "\n\n用户提出的研究问题；文献依据、比较条件与可行性仍待核对。")]
+                    response = f"先保留你的原意，整理为待确认的问题：“{candidate}”。下方只是讨论草案；接下来先核对比较对象和判断差异的标准，再讨论方法，尚未替你采纳或制定方案。"
+            if not suggestions:
+                questions = ["你想回答的研究问题是什么？可以先按自己的话写一句。"]
+    elif step == "design":
+        response = (f"围绕已确认的问题“{question['title']}”继续。" if question else "先围绕你提出的问题检查可行性，不必重新从零选题。")
+        known = [label + "：" + context.get("brief", {}).get(field, "") for field, label in (("resources", "已有资源"), ("time_budget", "可用时间")) if context.get("brief", {}).get(field)]
+        if known:
+            response += "\n\n" + "；".join(known) + "。这些条件继续沿用。"
+        response += "\n\n先核对方法能否回答这个问题、比较是否公平、最关键的资料是否可用；未知条件保留待确认。这轮先选出最影响可行性的一项，再决定是否准备研究方案，不安排实际执行。"
         if not context.get("brief", {}).get("resources"):
             questions = ["哪些必要资料或数据已可使用，哪些还不确定？"]
+    elif step == "exploration":
+        topic = context.get("topic", "当前方向")
+        response = f"围绕“{topic}”，可以先比较两种切口：一是复用已有方法，找清它在哪类对象或条件下受限；二是缩小比较范围，只研究一个会影响结果的差异。先按兴趣和已有基础取舍，再补最接近的文献；这些是选题方式，不是已证实的研究空白。"
+        if beginner:
+            response += "这里的复用，是先理解别人怎样解决问题，再决定自己要改哪一小部分。"
     else:
-        response = advice[area] + "\n\n" + missing
-    if context.get("conversation", {}).get("guidance_mode") == "case":
+        response = "先从你最想解决的一个具体困难入手。我会帮你把它缩小为可讨论的问题，再按需要结合论文与条件继续；已经告诉我的信息不必重填。"
+    if conversation.get("guidance_mode") == "case":
         response += "\n\n当前保存的是历史案例模式设置，但教学案例内容尚未接入；以上只提供普通规则讨论。"
     notes = (
         [SuggestedItem(kind="note", title=text.strip()[:45], content=text)]
@@ -342,7 +410,8 @@ def rule_guidance(area: Area, text: str, context: dict) -> GuideDraft:
     return GuideDraft(
         reply="当前为规则指导，未调用模型。\n\n" + response,
         questions=questions,
-        suggestions=notes,
+        suggestions=notes or suggestions,
+        cited_paper_ids=cited,
     )
 
 
