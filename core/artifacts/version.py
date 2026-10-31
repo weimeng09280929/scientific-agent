@@ -37,13 +37,16 @@ class ArtifactVersionError(Exception):
 class ArtifactContentStore:
     """产出物内容文件存储。"""
 
-    def __init__(self, artifacts_dir: Path):
+    def __init__(self, artifacts_dir: Path, *, read_only=False):
         self._root = artifacts_dir
-        self._root.mkdir(parents=True, exist_ok=True)
+        self._read_only = read_only
+        if not read_only:
+            self._root.mkdir(parents=True, exist_ok=True)
 
     def group_dir(self, artifact_group: EntityId) -> Path:
         d = self._root / artifact_group
-        d.mkdir(parents=True, exist_ok=True)
+        if not self._read_only:
+            d.mkdir(parents=True, exist_ok=True)
         return d
 
     def write_text_content(
@@ -274,7 +277,8 @@ class ArtifactManager:
         if artifact.content is not None:
             return artifact.content
         if artifact.content_path:
-            path = Path(artifact.content_path)
-            if path.exists():
+            from core.storage_paths import project_file
+            path = project_file(artifact.content_path, self._content._root.parent)
+            if path.is_relative_to(self._content._root.resolve()) and path.is_file():
                 return path.read_text(encoding="utf-8")
         return None

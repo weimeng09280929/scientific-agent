@@ -80,6 +80,7 @@ class ReplyOption(Contract):
 
     label: str = Field(min_length=1, max_length=40)
     content: str = Field(min_length=1, max_length=500)
+    explanation: str | None = Field(default=None, max_length=160, description="本条讨论的目的与预期，例如得到比较清单；不承诺执行、保存或科研结论，与content含义一致")
 
 
 class ActionProposal(Contract):
@@ -143,6 +144,10 @@ class Message(Contract):
     suggested_replies: list[ReplyOption] = Field(default_factory=list)
     actions: list[GuidanceAction] = Field(default_factory=list)
     delivery_warnings: list[str] = Field(default_factory=list, max_length=6)
+    # Server-authored task delivery metadata; not accepted in GuideDraft output.
+    research_task_id: str | None = None
+    report_version: int | None = None
+    report_citations: list[dict] = Field(default_factory=list)
     created_at: str = Field(default_factory=now)
     conversation_id: str | None = None
     request_id: str | None = None
@@ -157,6 +162,9 @@ class Workspace(Contract):
     revision: int = 0
     chat_revision: int = 0
     brief: Brief = Field(default_factory=Brief)
+    # Metadata only: no second copy of background or chat summary. Old stores
+    # remain readable without migration; a manual change records its revision.
+    brief_revision: int = Field(default=0, ge=0)
     focus: ResearchFocus = Field(default_factory=ResearchFocus)
     items: list[WorkItem] = Field(default_factory=list)
     messages: list[Message] = Field(default_factory=list)

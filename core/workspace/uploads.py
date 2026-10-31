@@ -158,12 +158,15 @@ class UploadService:
                     )
                     if not acquired:
                         duplicate = True
-                    elif prior:
+                    else:
+                        from core.resource_limits import RESOURCES
+                        owner.enter_context(RESOURCES.acquire())
+                    if acquired and prior:
                         conn.execute(
                             "UPDATE sra_upload_requests SET status='processing',error=NULL,attempt=attempt+1 WHERE request_id=?",
                             (rid,),
                         )
-                    else:
+                    elif acquired:
                         conn.execute(
                             "INSERT INTO sra_upload_requests VALUES (?,?,?,?,?,?,?,?,?)",
                             (
@@ -225,6 +228,8 @@ class UploadService:
                             rid,
                         ),
                     )
+                if isinstance(exc, UploadError):
+                    raise
                 raise UploadError(
                     "上传尚未完成，原请求已保留；请核对状态后用同一文件与编号重试", 503
                 ) from exc

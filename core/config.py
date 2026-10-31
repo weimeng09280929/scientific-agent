@@ -133,6 +133,13 @@ class GlobalConfig:
     def load(cls) -> "GlobalConfig":
         """从环境变量加载配置。"""
         cfg = cls()
+        if os.environ.get("SRA_DATA_ROOT"):
+            cfg.paths = ProjectPaths.from_root(os.environ["SRA_DATA_ROOT"])
+        if os.environ.get("SRA_PROJECTS_DIR"):
+            cfg.paths = ProjectPaths(
+                root=cfg.paths.root, core=cfg.paths.core, stages=cfg.paths.stages,
+                projects=Path(os.environ["SRA_PROJECTS_DIR"]).resolve(), tests=cfg.paths.tests,
+            )
         # 允许通过环境变量覆盖 tasks 配置路径
         env_tasks_path = os.environ.get("SRA_TASKS_CONFIG_PATH")
         if env_tasks_path:

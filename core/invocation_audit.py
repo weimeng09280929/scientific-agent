@@ -29,6 +29,57 @@ def stamp():
     return datetime.now(timezone.utc).isoformat()
 
 
+def inherited_policy(db: Path, operation_id: str):
+    """Return a persisted enclosing limit, never a fresh allowance."""
+    db = Path(db)
+    if not db.is_file():
+        return None
+    with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        row = conn.execute(
+            "SELECT group_id FROM sra_call_audit WHERE operation_id=? ORDER BY started_at,id LIMIT 1",
+            (operation_id,),
+        ).fetchone() if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='sra_call_audit'"
+        ).fetchone() else None
+        if not row or row[0] == operation_id:
+            return None
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='sra_call_policies'").fetchone():
+            # Historical upper-limit runs have no durable policy. Fail closed.
+            return {"unavailable": True}
+        saved = conn.execute(
+            "SELECT policy FROM sra_call_policies WHERE group_id=?", (row[0],)
+        ).fetchone()
+        return {"group_id": row[0], **json.loads(saved[0])} if saved else {"unavailable": True}
+
+
+def budget_state(db: Path, operation_id: str):
+    """Read actual network reservations, including any enclosing group."""
+    db = Path(db)
+    with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='sra_call_audit'").fetchone():
+            return {"used": 0, "limit": 6, "remaining": 6, "parent_remaining": None}
+        used = conn.execute(
+            "SELECT COUNT(*) FROM sra_call_audit WHERE operation_id=? AND event='network' AND kind='model'",
+            (operation_id,),
+        ).fetchone()[0]
+        policy = inherited_policy(db, operation_id)
+        parent_remaining = None
+        if policy:
+            if policy.get("unavailable"):
+                parent_remaining = 0
+            else:
+                total = conn.execute(
+                    "SELECT COUNT(*) FROM sra_call_audit WHERE group_id=? AND event='network' AND kind='model'",
+                    (policy["group_id"],),
+                ).fetchone()[0]
+                parent_remaining = max(0, policy["limits"].get("model", 0) - total)
+                return {"used": total, "limit": policy["limits"].get("model", 0),
+                        "remaining": parent_remaining, "parent_remaining": parent_remaining,
+                        "local_used": used}
+        return {"used": used, "limit": 6, "remaining": 0 if parent_remaining == 0 else max(0, 6 - used),
+                "parent_remaining": parent_remaining, "local_used": used}
+
+
 @dataclass
 class AuditScope:
     db: Path
@@ -96,12 +147,33 @@ class AuditScope:
         with self.connect(True) as conn:
             group = self.group_id or self.operation_id
             if event == "network":
+                # A parent authorization must survive a worker restart. A new
+                # chat round may get its own local allowance, but may never
+                # discard an enclosing user-set group/cost/model boundary.
+                if group != self.operation_id:
+                    conn.execute("""CREATE TABLE IF NOT EXISTS sra_call_policies (
+                        group_id TEXT PRIMARY KEY, policy TEXT NOT NULL)""")
+                    conn.execute(
+                        "INSERT OR IGNORE INTO sra_call_policies VALUES (?,?)",
+                        (group, json.dumps({"limits": self.limits, "pricing": self.pricing,
+                                            "cost_limit": self.cost_limit,
+                                            "stop_on_model_failure": self.stop_on_model_failure,
+                                            "expected_model": self.expected_model})),
+                    )
+                    policy = json.loads(conn.execute(
+                        "SELECT policy FROM sra_call_policies WHERE group_id=?", (group,)
+                    ).fetchone()[0])
+                    self.limits = policy["limits"]
+                    self.pricing = policy["pricing"]
+                    self.cost_limit = policy["cost_limit"]
+                    self.stop_on_model_failure = policy["stop_on_model_failure"]
+                    self.expected_model = policy["expected_model"]
                 if (
                     kind == "model"
                     and self.expected_model
                     and name != self.expected_model
                 ):
-                    raise CallLimitError("模型与本次授权不一致，未发出调用")
+                    raise CallLimitError("模型与本次授权不一致，未发出调用", "model_mismatch")
                 if (
                     self.stop_on_model_failure
                     and conn.execute(
@@ -110,7 +182,7 @@ class AuditScope:
                     ).fetchone()
                 ):
                     raise CallLimitError(
-                        "本次真实验收已遇到模型失败，按约定停止后续调用"
+                        "本次真实验收已遇到模型失败，按约定停止后续调用", "parent_stopped"
                     )
                 count = conn.execute(
                     "SELECT COUNT(*) FROM sra_call_audit WHERE group_id=? AND event='network' AND kind=?",
@@ -133,7 +205,7 @@ class AuditScope:
                 if kind == "model" and self.cost_limit is not None:
                     if reserved_cost is None:
                         raise CallLimitError(
-                            "未取得可核验单价，无法保证费用上限，本次未发出模型请求"
+                            "未取得可核验单价，无法保证费用上限，本次未发出模型请求", "cost_unknown"
                         )
                     used = conn.execute(
                         "SELECT COALESCE(SUM(reserved_cost),0) FROM sra_call_audit WHERE group_id=? AND event='network' AND kind='model'",
@@ -141,7 +213,7 @@ class AuditScope:
                     ).fetchone()[0]
                     if used + reserved_cost > self.cost_limit:
                         raise CallLimitError(
-                            "本次预留费用将超过授权上限，未发出模型请求"
+                            "本次预留费用将超过授权上限，未发出模型请求", "cost_exhausted"
                         )
             conn.execute(
                 "INSERT INTO sra_call_audit VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

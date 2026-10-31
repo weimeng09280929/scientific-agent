@@ -21,12 +21,13 @@ from core.workspace.teaching import (
 from core.workspace.teaching_packages import catalog
 
 
-def build_teaching_router(configuration, require_project, register_project):
+def build_teaching_router(configuration, require_project, register_project, owner_id=None):
     router = APIRouter(prefix="/api", tags=["teaching-cases"])
     cfg = lambda: configuration() if callable(configuration) else configuration
 
     def starter():
-        return ConversationStarter(cfg().paths, require_project, register_project)
+        return ConversationStarter(cfg().paths, require_project, register_project,
+                                   owner_id=owner_id() if owner_id else None)
 
     def service(pid):
         require_project(pid)

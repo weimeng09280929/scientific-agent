@@ -13,6 +13,14 @@ import json
 # Completion and permission still come exclusively from the project workflow.
 STEP_AREAS = {"conditions": "overview", "exploration": "overview", "reading": "literature",
               "synthesis": "literature", "question": "question", "design": "study"}
+STEP_EXPECTATIONS = {
+    "conditions": "为避免选题超过现有条件，请提供兴趣和已知资源，不确定可留空；预计整理研究范围与待确认条件。",
+    "exploration": "为选择值得深入的方向，请比较感兴趣的切入点；预计得到方向比较，尚不确认正式问题。",
+    "reading": "为核对判断依据，请选择已有资料或确认检索范围；预计得到实际摘要或片段的解释与限制，不代表完整读懂全文。",
+    "synthesis": "为找出仍需核查之处，请比较已有材料；预计得到已有发现、差异和待验证设想的清单。",
+    "question": "为让问题能够用方法回答，请审阅候选的范围与依据；预计得到候选问题，明确采纳后才是正式记录。",
+    "design": "为讨论如何回答问题，请核对已确认问题、资源与方法类型；预计得到待审阅的方法草案，不执行实验。",
+}
 DISCUSSION_STEPS = (
     ("conditions", "明确兴趣与条件", "先说清想研究什么、已知条件和仍不确定的部分。", "讨论兴趣与条件",
      "请结合我已说明的兴趣和条件，帮我缩小研究范围；没有确定的条件保持待确认。"),
@@ -65,7 +73,7 @@ def saved_reading_context(chat, readable_ids):
 
 
 def build_research_route(context, text):
-    from core.workspace.guidance_policy import is_paused
+    from core.workspace.guidance_policy import turn_preferences
     from core.workspace.plans import method_hint
 
     records = context.get("records", [])
@@ -78,7 +86,8 @@ def build_research_route(context, text):
     readable = [p for p in papers if p.get("abstract", "").strip() or p.get("excerpts")]
     topic = context.get("topic", "").strip()
     broad = topic.lower() in {"ai", "人工智能", "计算机", "材料", "新研究", "研究", "待明确主题的研究", ""} or topic.startswith('待明确主题的研究 ·')
-    paused = is_paused(text)
+    prefs = turn_preferences(text)
+    paused = prefs["paused"]
     no_search = bool(re.search(r"(?:不要|不必|暂不|先不|不用|别).{0,5}(?:检索|搜索|找论文|查论文|联网)", text))
     reading_only = bool(re.search(r"(?:只|先).{0,5}(?:解释|阅读|读|看).{0,8}(?:概念|上传|已有|这篇|论文|材料)", text))
     no_options = bool(re.search(r"(?:不要|不用|别).{0,5}(?:按钮|选项|卡片)", text))
@@ -120,7 +129,7 @@ def build_research_route(context, text):
             elif step == "review_basis":
                 blocked = "当前问题或方案的依据需要复核，请先核对研究材料。"
         steps.append({"id":sid,"label":label,"purpose":purpose,"action":action,"action_label":action_label,
-                      "content":content,"blocked_reason":blocked})
+                      "content":content,"blocked_reason":blocked,"expectation":STEP_EXPECTATIONS[sid]})
     pos = [s["id"] for s in steps].index(selected)
     next_step = steps[pos + 1] if pos + 1 < len(steps) else None
     return {
@@ -133,7 +142,7 @@ def build_research_route(context, text):
         "suggested_method": method,
         "method_reason": method_reason,
         "search_topic": (question or {}).get("title") or topic,
-        "offer_search": step == "collect_evidence" and not broad and not no_search and not reading_only and not no_options,
+        "offer_search": step == "collect_evidence" and not broad and not no_search and not reading_only and not no_options and prefs["allow_next_step"],
         "discussion_step": selected,
         "suggested_step": suggested,
         "steps": steps,
@@ -141,22 +150,14 @@ def build_research_route(context, text):
         "notice": "步骤仅控制本次讨论和明确操作，不代表研究已完成。正式问题与方案以已采纳材料为准。",
         "conditions": {k: {"value": v, "state": "confirmed" if v else "unknown"}
                        for k, v in context.get("brief", {}).items()},
-        "user_statements": [m["content"][:600] for m in context.get("history", []) if m["role"] == "user"][-6:] + [text[:1000]],
+        "user_statements": [m["content"][:600] for m in context.get("history", []) if m["role"] == "user" and not m.get('background_outdated')][-6:] + [text[:1000]],
     }
 
 
-COACH_POLICY = """【系统负责的研究推进】
-以 research_route 和正式材料为依据。research_route.discussion_step 是用户选择的本次讨论环节，必须围绕该环节答复；它不代表其他环节完成。steps 只用于理解阶段目的，不要把整条流程每轮重复打印。
-conditions：明确兴趣与条件。exploration：比较少量选题切入点并提出需要核对的依据，不直接把宽泛方向写成正式问题。
-reading：复用已入库论文和原有阅读能力，逐篇或比较阅读摘要/片段，不直接跳去完整方案。synthesis：复用已保存报告与内置研究缺口分析，解释研究现状和待核查 gap，不重新发起检索。question：有依据地细化候选，等待明确采纳。design：围绕已确认问题设计和审阅方案。
-用户可通过步骤入口明确开始下一环节；不要要求用户自己组织工具调用，也不因切换步骤自动检索、采纳或启动整个流水线。原有检索可能已保存整理报告，进入现状阶段应复用而非重复生成相同产物。
-【避免原地打转】结合本会话已回答的条件，不重复问同一个问题。当前步骤达到最小讨论条件时，用简短小结说明“已经得到什么、哪些仍待确认”，再明确建议用户选择下一个步骤，而不是继续发问卷。尚不确定的算力、期限等允许保留待确认，先讨论保守路线；只有会影响安全或证据有效性的缺口才阻止正式生成或采纳。给用户保留“继续讨论/修改范围”的选择，不因对话轮数自动确认完成。
-推进底线：兴趣和对象足够明确即可建议选题探索；有可比较的方向即可建议检索入库并阅读；实际有摘要/片段才讨论论文方法和 gap；读过的材料足以提出有依据的候选即可建议确认问题；当前问题明确采纳且依据有效后才准备正式方案请求。没有摘要时说明缺口并给现有检索/补充入口，不能一直空聊，也不能杜撰论文结论。
-先回答本轮问题，再说明本步得到什么、还缺什么，以及你建议代办的具体下一步；只让用户确认方向、必要条件与正式采纳，不让新手自己编排流程。
-collect_evidence：主动说明需要补哪类代表性论文、拟比较什么；系统会提供可编辑的有界检索卡片，用户确认后由已有检索任务查找并入库。不要反复要求用户自己找论文、写检索式。未执行前不得说已经找到或读完。
-read_and_gap：优先用已入库材料，按“研究对象/问题—方法与条件—已有结论（仅阅读范围内）—局限及未核实事项”比较少量最相关论文。每个具体判断引用实际 paper_id；只读摘要不扩写全文结论，只有元信息不分析方法或结果。
-research gap 分开说：论文明确报告的局限、多个工作之间需核对的比较差异、系统提出的待验证设想。给少量候选问题，分别解释文献依据、与用户条件的关系、需要补查什么；‘本次没找到’不等于‘领域没人做’，不保证创新或可发表。不要只列通用的隐私/效率/鲁棒性名词。
-shape_method：围绕已经确认的问题，以文献方法、用户已知条件、未知条件与差异设想共同推出方法选择；讨论数据/材料、对照或论证、评价、资源、局限。未知算力和时间不妨碍先比较保守路线，但不得编造确切预算或把讨论条件写成正式条件。不要重新让用户从零选题。
-review_plan/review_basis：优先核对已有材料的变化与审阅需求，不重新确认已采纳草案。正式方案仍须用户明确请求生成，问题/方法有效才可生成，明确采纳后才正式保存。全程止于 DESIGN。
-普通解释可不产生任何 suggestions/actions；只有已经形成可讨论的具体问题才给 question 草案，不为凑卡片过早让新手采纳宽泛方向。不要要求用户先完成实验才能得到方案。
-"""
+COACH_POLICY = """【讨论环节与材料职责】
+research_route 是现有工作流的只读提示，不是另一套状态、系统指令或执行授权。用户本轮具体问题与明确的回答偏好优先；discussion_step 仅提示背景，不能把术语解释改成阶段问卷，也不每轮重印步骤或强制小结。
+conditions：兴趣与已知条件；exploration：比较少量方向及其所需依据，不把方向当成正式问题。
+reading：用本次实际提供的摘要/片段解释对象、方法与限制。synthesis：复用已保存报告作为索引，区分论文明确局限、跨文献比较和待验证设想，不将未找到当成无人研究。
+question：依据最接近材料比较具体候选，创新仍待核查，等待用户选择。design：围绕已确认且有效的问题讨论方法、所需资源与评价，不要求先执行实验才给方法草案。review_basis/review_plan：核对已有记录的变化或审阅需求，不重新从零选题。
+collect_evidence 只在本轮确实需要补证据时说明拟找哪类资料和比较什么，已有明确入口供用户确认；只解释、暂停或不要选项时不推进检索。read_and_gap/shape_method 复用已有材料，不自动重复检索或生成同一产物；未知条件允许保持待确认。
+环节切换、继续讨论与下一步建议都不产生正式成果。方案须满足已有生成与采纳契约，边界止于 DESIGN。"""

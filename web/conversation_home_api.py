@@ -25,12 +25,12 @@ class ProjectName(Contract):
         return value.strip()
 
 
-def build_home_router(configuration, require_project, register_project):
+def build_home_router(configuration, require_project, register_project, owner_id=None):
     router = APIRouter(prefix="/api", tags=["conversation-home"])
     config = lambda: configuration() if callable(configuration) else configuration
     from web.teaching_case_api import build_teaching_router
 
-    teaching = build_teaching_router(configuration, require_project, register_project)
+    teaching = build_teaching_router(configuration, require_project, register_project, owner_id=owner_id)
     # Both routers already include /api: extend rather than add a second prefix.
     router.routes.extend(teaching.routes)
 
@@ -41,6 +41,7 @@ def build_home_router(configuration, require_project, register_project):
             "project_conversations": True,
             "durable_start": True,
             "message_tail": True,
+            "conversation_moves": bool(owner_id and owner_id()),
             "catalog_navigation": True,
             "conversation_search": True,
             "project_exports": True,
@@ -69,9 +70,14 @@ def build_home_router(configuration, require_project, register_project):
     def start(request: StartConversation):
         try:
             return ConversationStarter(
-                config().paths, require_project, register_project
+                config().paths, require_project, register_project,
+                owner_id=owner_id() if owner_id else None,
             ).start(request)
         except WorkspaceError as exc:
+            from core.workspace.conversation_moves import ConversationMoved
+            if isinstance(exc,ConversationMoved):
+                from web.conversation_move_api import moved_error
+                moved_error(exc,config().paths,require_project)
             code = (
                 404
                 if isinstance(exc, ConversationNotFound)

@@ -124,14 +124,26 @@ def test_condition_provenance_and_one_bounded_repair(chat, condition):
         assert len(chat.calls) == (2 if condition == "paraphrase" else 1)
         if condition == "paraphrase":
             assert chat.calls[-1]["context"]["condition_repair"]["field"] == "resources"
-        # Explicit retry stays attached to the original user message. No duplicate
-        # suggestions can be saved by a failed repair or previous attempt.
+        assert r.json()["failure"]["reason"] == "structure_invalid"
+        assert r.json()["failure"]["can_retry"] is False
+        before = s.load(include_chat=False).model_dump(mode="json")
+        call_count = len(chat.calls)
+        # P1 deliberately forbids blind retries of invalid evidence. Swapping
+        # the model substitute cannot authorize a new execution of this request.
         chat.control["generate"] = lambda area, text, ctx: model(ctx)
         rr = chat.client.post(
             f"/api/projects/p1/conversations/{cid}/requests/plan/retry", json={}
         )
-        assert rr.status_code == 200, rr.text
-        assert len(messages(chat, cid)) == 2 and len(rr.json()["suggestions"]) == 1
+        assert rr.status_code == 422, rr.text
+        assert rr.json()["status"] == "failed"
+        assert rr.json()["failure"]["reason"] == "structure_invalid"
+        assert rr.json()["failure"]["can_retry"] is False
+        assert rr.json()["attempt"] == r.json()["attempt"]
+        assert rr.json()["request_id"] == r.json()["request_id"]
+        assert rr.json()["call_audit"] == r.json()["call_audit"]
+        assert len(chat.calls) == call_count
+        assert len(messages(chat, cid)) == 1 and rr.json()["suggestions"] == []
+        assert s.load(include_chat=False).model_dump(mode="json") == before
     else:
         assert r.status_code == 200, r.text
         assert not r.json()["suggestions"][0]["applied_item_id"]

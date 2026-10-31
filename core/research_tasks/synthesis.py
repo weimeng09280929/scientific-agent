@@ -15,6 +15,10 @@ import json
 import logging
 import re
 from core.research_tasks.coverage import scope_text
+from core.research_tasks.report_sources import (
+    reference_index, format_prose, cited_text, references_markdown, readable,
+    prose_reference_ids, entry_reference_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +156,7 @@ def _rule_report(topic, queries, ranked, source_outcomes, limits) -> dict:
             "可与当前研究问题对照，讨论哪些候选值得深入",
         ],
         "mode": "rules",
+        "catalog_kind": "metadata_only" if ranked and not any(c.get("has_abstract") and c.get("abstract") for c in ranked) else "rules",
     }
 
 
@@ -172,7 +177,7 @@ def synthesize_report(
     任务明确失败，保留检索结果。
     """
     candidate_ids = [c["paper_id"] for c in ranked]
-    if model_fn is None:
+    if model_fn is None or not any(c.get("has_abstract") and c.get("abstract") for c in ranked):
         return _with_coverage(_rule_report(topic, queries, ranked, source_outcomes, limits),coverage), ""
     candidates_payload = [
         {
@@ -211,6 +216,9 @@ def synthesize_report(
             "截断或不可解析的输出未被采用。"
         )
     report = _validate_report(data, candidate_ids)
+    prose_fields = [report["methods_relations"], *[p["point"] for p in report["representative"]], *[p["point"] for p in report["limitations"]]]
+    if any(pid not in candidate_ids for text in prose_fields for pid in prose_reference_ids(text, {"source_snapshot":{"sources":ranked}})):
+        raise SynthesisValidationError("整理正文引用了候选之外或截断的论文编号")
     # Model prose cannot replace source/selection facts, scope or next actions.
     prose = json.dumps([report["representative"],report["limitations"],report["methods_relations"]],ensure_ascii=False)
     if coverage:
@@ -241,6 +249,7 @@ def report_markdown(task: dict) -> str:
         f"# 研究现状整理：{task.get('topic', '')}",
         "",
         f"- 任务：`{task.get('task_id', '')}` · 状态：{task.get('status_label', task.get('status', ''))}",
+        f"- 报告版本：v{task.get('report_version') or '历史未标版'}",
         f"- 检索范围：{task.get('year_label', '未限定年份')}",
         f"- 查询（{len(task.get('queries', []))} 条，上限 {task.get('limits', {}).get('max_queries', 3)}）：",
     ]
@@ -256,6 +265,12 @@ def report_markdown(task: dict) -> str:
         else:
             lines.append(f"- {call['source']}：**调用失败**（{call.get('error', '')[:120]}）")
     report = task.get("report") or {}
+    if task.get("synthesis_note"):
+        lines.append("\n> 模型内容整理未成功，本版本仅保存规则资料目录；不是正常研究内容综合。详细原因：" + str(task["synthesis_note"]))
+    references = reference_index(report)
+    by_id = {p['paper_id']:p for p in references}
+    if task.get("historical_context_missing"):
+        lines.append("历史版本未绑定查询／来源执行快照，无法可靠还原；未使用后来的任务记录补齐。")
     lines.append("")
     lines.append("## 覆盖范围")
     lines.append(report.get("summary", "（无）") if isinstance(report, dict) else str(report))
@@ -268,7 +283,7 @@ def report_markdown(task: dict) -> str:
         lines.append("以下为报告生成时的服务端统计快照；各次返回含重复，不等于唯一论文数。")
         for key,label in [("raw_returned_attempt_total","来源原始记录累计"),("valid_returned_attempt_total","有效记录累计"),("unique_before_limit","去重后、候选上限前"),("screened_candidates","已处理候选"),("omitted_by_candidate_limit","受候选上限未处理"),("included_count","纳入综合"),("excluded_count","已返回但排除"),("newly_saved_count","新入库"),("linked_existing_count","关联已有")]:
             lines.append(f"- {label}：{facts.get(key) if facts.get(key) is not None else '未知（历史记录未提供）'}")
-        for entry in facts["excluded"]:
+        for entry in facts.get("excluded", []):
             lines.append(f"- 排除：{entry['title']}；理由：{entry['reason']}；判定来源：{entry['decision_source']}")
     else:
         lines.append(
@@ -291,27 +306,44 @@ def report_markdown(task: dict) -> str:
     lines.append("")
     lines.append("## 代表性研究")
     for entry in report.get("representative", []):
-        lines.append(f"- [`{entry['paper_id'][:12]}`] {entry.get('point', '')}")
+        source = by_id.get(entry.get('paper_id'), {})
+        ids = entry_reference_ids(entry, report)
+        if source.get('reading_scope') == 'metadata':
+            text = (source.get('title') or '题名缺失') + '；仅元信息，不能据此分析方法或结论。'
+        else:
+            text = entry.get('point', '')
+            if not ids or not all(readable(by_id.get(pid, {})) for pid in ids):
+                text += '（该版本的来源或阅读范围无法可靠还原，此表述须回查原始资料。）'
+        lines.append('- ' + cited_text(text,ids,references))
     if report.get("methods_relations"):
         lines.append("")
         lines.append("## 方法之间的联系与差异")
-        lines.append(report["methods_relations"])
+        ids = prose_reference_ids(report["methods_relations"],report)
+        if ids and all(readable(by_id.get(pid, {})) for pid in ids):
+            lines.append(format_prose(report["methods_relations"],references))
+        else:
+            lines.append('原报告该段缺少逐项可核对的引用或可读内容范围，不作为已证实的方法比较。')
+            lines.append('待核对的原始整理文字：' + format_prose(report["methods_relations"],references))
     if report.get("limitations"):
         lines.append("")
-        lines.append("## 有文献支持的局限或分歧")
+        lines.append("## 局限或分歧（需按引用核对）")
         for entry in report.get("limitations", []):
-            ids = "、".join(f"`{p[:12]}`" for p in entry.get("paper_ids", []))
-            lines.append(f"- {entry.get('point', '')}{('（来源：' + ids + '）') if ids else ''}")
+            ids = entry_reference_ids(entry, report)
+            text = entry.get('point','')
+            if not ids or not all(readable(by_id.get(pid,{})) for pid in ids):
+                text += '（缺少可确认的内容依据，待核查，不是已证实的局限。）'
+            lines.append('- ' + cited_text(text,ids,references))
     if report.get("gaps"):
         lines.append("")
         lines.append("## 尚需补充核查")
         for gap in report.get("gaps", []):
-            lines.append(f"- {gap}")
+            lines.append('- ' + format_prose(gap,references))
     if report.get("next_steps"):
         lines.append("")
         lines.append("## 可选择的下一步")
         for step in report.get("next_steps", []):
-            lines.append(f"- {step}")
+            lines.append('- ' + format_prose(step,references))
+    lines.extend(['', references_markdown(report)])
     lines.append("")
     lines.append(
         "> 候选文献不等于已阅读或认可；入库论文不自动成为正式研究问题的依据关联。"

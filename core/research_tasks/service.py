@@ -41,6 +41,13 @@ from core.research_tasks.synthesis import (
 )
 from core.workspace.schema import Contract, Message, now
 from core.workspace.service import WorkspaceError
+from core.research_tasks.report_sources import (
+    freeze_sources, reference_index, research_points, cited_text, format_prose,
+    supported_limitations, supported_relations, catalog_markdown,
+    prose_reference_ids,
+    delivery_reference_ids,
+)
+from core.research_tasks.report_status import report_status
 
 TERMINAL = ("completed", "partial", "failed", "interrupted", "cancelled")
 ACTIVE = ("queued", "running")
@@ -262,6 +269,8 @@ class ResearchTaskService:
 
     def _effective(self, row):
         status = row["status"]
+        if status == "queued" and row["owner_process"] != self.PROCESS_IDENTITY:
+            return "interrupted"
         # running 必然在持锁后设置：锁已释放而状态仍 running => 执行者已丢失。
         # queued 不探测：刚登记的任务可能尚未被 runner 领取，不能误报中断。
         if status == "running" and not task_lock_held(self.db_path):
@@ -329,7 +338,9 @@ class ResearchTaskService:
             "card_message_id": row["card_message_id"],
             "report_versions": [
                 {"version": v.get("version"), "status": v.get("status"),
-                 "delivered_at": v.get("delivered_at"), "resume": bool(v.get("resume"))}
+                 "delivered_at": v.get("delivered_at"), "resume": bool(v.get("resume")),
+                 **report_status(v.get("status"), (v.get("report") or {}).get("mode") or v.get("mode"),
+                                 v.get("synthesis_note") or "", (v.get("report") or {}).get("catalog_kind"))}
                 for v in versions
             ],
             "current_version": versions[-1]["version"] if versions else 0,
@@ -347,23 +358,50 @@ class ResearchTaskService:
                 "running": "运行中",
             }[status],
         }
+        if report:
+            state = self._report_task(row)
+            view.update({k:state[k] for k in ("content_status", "content_label")})
+            if status in ("completed", "partial"):
+                view["status_label"] = state["status_label"]
+        from core.resource_limits import RESOURCES
+        view["work_still_running"] = RESOURCES.is_active(self._resource_key(row["task_id"]))
+        if row["cancel_requested"] and view["work_still_running"]:
+            view["cancel_note"] = "取消已提出，当前操作尚未结束，仍占用处理名额；结束后才可继续。已保存材料保留。"
         if include_report and status in ("completed", "partial", "cancelled", "failed"):
             view["report"] = report
-            view["report_markdown"] = report_markdown(
-                {
-                    "topic": row["topic"],
-                    "task_id": row["task_id"],
-                    "status": status,
-                    "status_label": view["status_label"],
-                    "year_label": self._year_label(row),
-                    "limits": self.limits.as_dict(),
-                    "queries": queries,
-                    "source_calls": calls,
-                    "report": report,
-                    "report_versions": view["report_versions"],
-                }
-            )
+            view["report_markdown"] = report_markdown(self._report_task(row))
         return view
+
+    def _report_task(self, row, version=None):
+        """One version-owned projection for panel, API and download. No writes."""
+        versions = json.loads(row.get("report_versions") or "[]")
+        entry = next((v for v in versions if v.get("version") == version), None) if version is not None else (versions[-1] if versions else None)
+        if version is not None and entry is None:
+            raise TaskNotFound(f"报告版本 v{version} 不存在")
+        report = (entry.get("report") or {}) if entry else json.loads(row.get("report") or "null") or {}
+        context = (entry or {}).get("render_context") or {}
+        coverage = report.get("coverage") or {}
+        status = (entry or {}).get("status") or row["status"]
+        synthesis_note = (entry.get("synthesis_note") if entry else row.get("synthesis_note")) or ""
+        state = report_status(status, report.get("mode") or (entry.get("mode") if entry else row.get("mode")), synthesis_note, report.get("catalog_kind"))
+        return {
+            "task_id": row["task_id"], "topic": context.get("topic", row["topic"]),
+            "status": status, **state,
+            "year_label": context.get("year_label", self._year_label(row)),
+            "limits": context.get("limits") or coverage.get("limits") or {},
+            "queries": context.get("queries", coverage.get("queries", [])),
+            "source_calls": context.get("source_calls", coverage.get("source_calls", [])),
+            "report": report, "report_version": (entry or {}).get("version"),
+            "report_versions": [{k:v for k,v in entry.items() if k not in ("report","render_context")}] if entry else [],
+            "historical_context_missing": not context and not coverage,
+            "synthesis_note": synthesis_note,
+        }
+
+    def report_document(self, task_id, version=None, *, catalog=False):
+        task = self._report_task(self._read(task_id), version)
+        if not task["report"]:
+            return "任务尚未产出报告；当前状态：" + task["status_label"] + "。已保存资料不等于整理结论。"
+        return catalog_markdown(task) if catalog else report_markdown(task)
 
     def _year_label(self, row):
         if row["year_from"] and row["year_to"]:
@@ -377,6 +415,11 @@ class ResearchTaskService:
     # ---- 启动 ----
 
     def start(self, cid: str, request: SearchTaskRequest):
+        from contextlib import ExitStack
+        with ExitStack() as ownership:
+            return self._start(cid, request, ownership)
+
+    def _start(self, cid, request, ownership):
         """启动任务：幂等登记 + 立即返回 task 视图（后台执行）。"""
         from core.workspace.teaching import guard_teaching
         guard_teaching(self.conversations)
@@ -415,8 +458,10 @@ class ResearchTaskService:
                 ).fetchone()
                 if processing:
                     raise TaskConflict("当前会话有正在处理的消息请求，请稍后再发起检索")
-            stamp = now()
             task_id = "task-" + uuid4().hex
+            from core.resource_limits import RESOURCES
+            ownership.enter_context(RESOURCES.acquire(key=self._resource_key(task_id)))
+            stamp = now()
             initial_log = encode(
                 [
                     {"stage": "queued", "detail": "任务已登记", "at": stamp},
@@ -511,8 +556,26 @@ class ResearchTaskService:
                 ),
             )
         row = self._read(task_id)
-        self._runner(lambda: self._execute(task_id, attempt=1))
+        self._launch(task_id, 1, ownership)
         return self.view(row)
+
+    def _launch(self, task_id, attempt, ownership):
+        lease = ownership.pop_all()
+        def work():
+            try:
+                self._execute(task_id, attempt)
+            finally:
+                lease.close()
+        try:
+            self._runner(work)
+        except BaseException:
+            lease.close()
+            self._update(task_id, status="failed", error="后台任务未能启动，请使用原任务明确重试",
+                         error_code=503, finished_at=now())
+            raise TaskError("后台任务未能启动，请使用原任务明确重试") from None
+
+    def _resource_key(self, task_id):
+        return str(self.db_path.resolve()) + ":research:" + task_id
 
     def _require_real_conversation(self, cid):
         """只允许在真实会话中发起检索；legacy 历史会话不做表迁移。"""
@@ -906,9 +969,8 @@ class ResearchTaskService:
                     ),
                 )
                 return
-        if synth_note:
-            mode = report.get("mode", mode)
-        self._update(task_id, synthesis_note=synth_note)
+        mode = report.get("mode", mode)
+        row = self._update(task_id, synthesis_note=synth_note)
         self._deliver(task_id, row, report, mode, saved, linked, token, resume=resume)
 
     def _outcomes_from(self, calls):
@@ -1015,7 +1077,12 @@ class ResearchTaskService:
             else "completed"
         )
         area = json.loads(row["payload"]).get("area") or "literature"
-        cited = list(dict.fromkeys([*saved_ids, *linked_ids]))
+        report = freeze_sources(report, json.loads(row["candidates"] or "[]"), mode)
+        catalog_ids = list(dict.fromkeys([*saved_ids, *linked_ids]))
+        report["source_snapshot"]["catalog"] = [p for p in report["source_snapshot"]["catalog"] if p["paper_id"] in catalog_ids]
+        refs = reference_index(report)
+        cited = delivery_reference_ids(report)
+        cited = [pid for pid in cited if pid in catalog_ids]
         content = self._delivery_text(
             row, report, status, len(saved_ids), len(linked_ids), resume=resume
         )
@@ -1027,6 +1094,9 @@ class ResearchTaskService:
             cited_paper_ids=cited,
             conversation_id=cid,
             request_id=row["request_id"],
+            research_task_id=task_id,
+            report_citations=[p for p in refs if p["paper_id"] in cited],
+            suggested_replies=self._delivery_choices(report),
         )
         actions = []
         if cited:
@@ -1034,10 +1104,12 @@ class ResearchTaskService:
                 {
                     "action_id": uuid4().hex,
                     "type": "view_references",
-                    "label": "查看本轮保存的文献",
+                    "label": "查看支撑本条回复的文献",
                     "paper_ids": cited,
                 }
             )
+        if catalog_ids:
+            actions.append({"action_id":uuid4().hex,"type":"view_references", "label":"查看本轮资料目录（非全部正文引用）","paper_ids":catalog_ids})
         message_data = json.loads(message.model_dump_json())
         message_data["actions"] = actions
         with self._connection(True) as conn:
@@ -1065,6 +1137,10 @@ class ResearchTaskService:
                     "saved_count": len(saved_ids),
                     "linked_count": len(linked_ids),
                     "delivered_at": stamp,
+                    "synthesis_note": row.get("synthesis_note") or "",
+                    "render_context": {"topic":row["topic"], "year_label":self._year_label(row),
+                        "limits":self.limits.as_dict(), "queries":json.loads(row["planned_queries"] or "[]"),
+                        "source_calls":json.loads(row["source_calls"] or "[]")},
                 }
             )
             content = (
@@ -1072,6 +1148,7 @@ class ResearchTaskService:
                 + f"\n（报告版本 v{version_no}，可在任务卡查看各版本）"
             )
             message_data["content"] = content
+            message_data["report_version"] = version_no
             redeliver = bool(current["delivered_message_id"]) and not resume
             if redeliver:
                 # 结果此前已交付（非补跑重跑）：不重复发布消息，只写回重跑后的终态。
@@ -1119,20 +1196,47 @@ class ResearchTaskService:
                 "completed": "检索与整理已完成。",
                 "partial": "检索与整理部分完成：部分来源调用失败，覆盖可能不足。",
             }[status]
-        queries = json.loads(row["planned_queries"] or "[]")
-        lines = [header, "", f"主题：{row['topic']}（{self._year_label(row)}）"]
-        lines.append("查询：" + "；".join(q.get("query", "") for q in queries))
-        summary = report.get("summary", "") if isinstance(report, dict) else ""
-        if summary:
-            lines.append("")
-            lines.append(summary)
-        if report.get("evidence_note"):
-            lines.append(f"证据边界：{report['evidence_note']}")
-        lines.append(
-            f"本轮新入库文献 {saved_count} 条，关联项目已有 {linked_count} 条（候选不等于已阅读或认可）。"
-        )
-        lines.append("完整报告与来源可在材料区与下载目录查看；你也可以选择继续阅读、调整检索范围或讨论研究问题。")
-        return "\n".join(line for line in lines if line != "")
+        if row.get("synthesis_note") and report.get("mode") == "rules":
+            header = "文献资料已保存，但模型内容整理未成功；本条仅交付规则元信息目录。" + ("部分来源也未成功，覆盖不足。" if status == "partial" else "")
+        lines = [header, "仅依据本轮可用资料，不代表全面调研或创新已获证明。"]
+        refs = reference_index(report)
+        points = research_points(report)
+        if points:
+            lines += ["", "**研究要点（基于已提供的摘要／片段）**"]
+            lines += ["- " + cited_text(text, ids, refs) for text,ids in points]
+            relation = supported_relations(report)
+            if relation:
+                lines += ["", "**主要差异：** " + format_prose(relation,refs)]
+            limits = supported_limitations(report)
+            if limits:
+                lines += ["", "**待核查：** " + cited_text(limits[0]["point"], limits[0]["paper_ids"], refs)]
+            else:
+                lines.append("\n现有报告尚未给出有逐项引用支持的局限；需要核对原文，不能据此认定研究空白。")
+        elif not (report.get("coverage") or {}).get("included_count", len(report.get("representative") or [])):
+            lines.append("本轮没有可用于综合的资料：可能是成功零结果，或候选已返回但被筛选排除；具体状态见任务详情。未生成研究结论。")
+        elif report.get("mode") == "rules":
+            lines.append("本轮仅交付规则元信息目录，未交付模型内容综合；没有把目录描述为研究结论。")
+        else:
+            lines.append("现有报告没有可追溯到可读摘要或正文的研究要点；仅元信息不能支持具体方法或结论，请补充材料后再讨论。")
+        lines.append("\n可从下面选择继续讨论；详细统计见任务详情。问题与方案仍须明确采纳。")
+        return "\n".join(lines)
+
+    def _delivery_choices(self, report):
+        from core.workspace.schema import ReplyOption
+        flow = self.conversations.shared.workflow().get("flow") or {}
+        if not research_points(report):
+            pairs = [("讨论缺少哪些材料", "请说明现有资料还缺少哪些阅读依据，先讨论，不自动重新检索。"),
+                     ("缩小检索问题", "先讨论怎样缩小检索问题和关键词，不自动执行检索。")]
+        elif flow.get("planReady"):
+            pairs = [("核对现有方案依据", "请对照刚才的文献核对当前方案依据，先讨论，不自动修改或采纳。"),
+                     ("讨论方案待确认事项", "请区分当前方案已确认与仍待核查的事项，不执行实验。")]
+        elif flow.get("question"):
+            pairs = [("核对当前研究问题", "请对照这些资料核对当前研究问题的范围和依据，先不修改正式记录。"),
+                     ("讨论方案比较条件", "基于当前问题和文献讨论拟定哪些比较或论证条件，暂不生成正式方案。")]
+        else:
+            pairs = [("比较论文方法", "请比较这些材料的研究对象、方法与适用条件，说明实际阅读范围，不重新检索。"),
+                     ("讨论候选研究问题", "请根据这些材料与已知条件讨论少量具体研究问题，先给候选，不替我确认或采纳。")]
+        return [ReplyOption(label=label,content=content) for label,content in pairs]
 
     def _deliver_resume_note(self, task_id, row, *, ok, failed_names=()):
         """补跑未能产生新报告时，在会话中明确说明；旧报告保持有效，不冒充新结果。"""
@@ -1266,6 +1370,13 @@ class ResearchTaskService:
             ).fetchone()
         if row is None:
             raise TaskNotFound("卡片所属消息不存在或不属于当前会话")
+        # Saved card JSON stays unchanged after a move; its original project
+        # context is no longer an authorization to start work in the new one.
+        from core.workspace.conversation_moves import history
+        with self._connection() as conn:
+            moves = history(conn, cid)
+        if moves and message_id in moves[-1]['message_origins']:
+            raise TaskConflict("历史卡片来自移动前的项目，请核对目标资料后重新明确发起检索")
         data = json.loads(row[0])
         action = next(
             (a for a in data.get("actions", []) if a.get("action_id") == action_id),
@@ -1308,10 +1419,15 @@ class ResearchTaskService:
             )
         row = self._read(task_id)
         view = self.view(row)
-        view["cancel_note"] = "已请求取消；将在当前阶段边界停止。已保存的材料不会静默删除。"
+        view.setdefault("cancel_note", "已请求取消；将在当前阶段边界停止。已保存的材料不会静默删除。")
         return view
 
     def retry(self, task_id, *, re_search=False, resume=False):
+        from contextlib import ExitStack
+        with ExitStack() as ownership:
+            return self._retry(task_id, re_search=re_search, resume=resume, ownership=ownership)
+
+    def _retry(self, task_id, *, re_search=False, resume=False, ownership):
         """明确重试/补跑：复用可用的已保存阶段结果，不承诺外部调用 exactly-once。
 
         - partial 任务只允许「补跑」：沿用原查询计划，仅重试失败来源，
@@ -1320,6 +1436,9 @@ class ResearchTaskService:
         - failed/interrupted/cancelled 的重试沿用既有语义。
         """
         row = self._read(task_id)
+        from core.resource_limits import RESOURCES
+        if RESOURCES.is_active(self._resource_key(task_id)):
+            return self.view(row)
         effective = self._effective(row)
         stale_queued = row["status"] == "queued" and not task_lock_held(self.db_path)
         if effective == "partial":
@@ -1349,6 +1468,8 @@ class ResearchTaskService:
         stamp = now()
         with self._connection(True) as conn:
             current = self._row(conn, task_id)
+            if RESOURCES.is_active(self._resource_key(task_id)):
+                return self.view(current)
             # 事务内重判：并发双击时，第二次请求会看到第一次已转入 queued/running。
             cur_effective = self._effective(current)
             cur_stale = current["status"] == "queued" and not task_lock_held(self.db_path)
@@ -1361,11 +1482,13 @@ class ResearchTaskService:
                 raise TaskConflict("任务仍在运行，无需重试")
             if task_lock_held(self.db_path):
                 raise TaskConflict("项目检索执行权被其他进程持有，请稍后重试")
+            from core.resource_limits import RESOURCES
+            ownership.enter_context(RESOURCES.acquire(key=self._resource_key(task_id)))
             conn.execute(
                 "UPDATE sra_research_tasks SET status='queued', stage='planning', attempts=attempts+1, "
                 "cancel_requested=0, error=NULL, error_code=NULL, owner_process=?, payload=?, updated_at=? "
                 "WHERE task_id=?",
                 (self.PROCESS_IDENTITY, encode(payload), stamp, task_id),
             )
-        self._runner(lambda: self._execute(task_id, attempt=row["attempts"] + 1))
+        self._launch(task_id, row["attempts"] + 1, ownership)
         return self.view(self._read(task_id))

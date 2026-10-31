@@ -21,6 +21,15 @@ def draft(**kw):
     return GuideDraft(reply="离线软件验收，不是真实模型质量证明。", **kw)
 
 
+def broad_beginner_project(chat):
+    # This fixture otherwise already has a formal question AND plan. A novice
+    # starting case must not silently test against an established research route.
+    from core.workspace.schema import Workspace
+    from core.workspace.service import KEY
+    chat.projects['p1'].topic='人工智能'
+    chat.services['p1'].store.save_kv(KEY,Workspace(project_id='p1').model_dump(mode='json'))
+
+
 def actions_url(cid, m, a, pid="p1"):
     return f"/api/projects/{pid}/conversations/{cid}/messages/{m['message_id']}/actions/{a['action_id']}"
 
@@ -257,6 +266,7 @@ def test_modes_shared_conditions_and_no_chat_revision_coupling(chat):
 def test_rules_scenarios_are_honest_and_do_not_modify_formal_materials(
     chat, text, stage
 ):
+    if '没有做过科研' in text:broad_beginner_project(chat)
     chat.config.dry_run = True
     cid = create(chat, guidance_mode="beginner", entry_stage=stage)
     before = chat.services["p1"].load(include_chat=False).model_dump()
@@ -388,6 +398,7 @@ def test_invented_first_person_resources_are_removed_not_saved_as_user_facts(cha
 
 
 def test_uncertain_beginner_not_reasked_same_question_and_explicit_no_options(chat):
+    broad_beginner_project(chat)
     cid = create(chat, guidance_mode="beginner")
     chat.control["generate"] = lambda area, text, ctx: rule_guidance(area, text, ctx)
     first = answer(send(chat, cid, "我没有做过科研"))
@@ -422,6 +433,7 @@ def test_question_card_is_bound_to_new_draft_and_case_rules_are_honest(chat):
 
 
 def test_real_rules_modes_change_guidance_depth_not_shared_materials(chat):
+    broad_beginner_project(chat)
     chat.config.dry_run = True
     a = create(chat, guidance_mode="beginner")
     b = create(chat, guidance_mode="direct")
@@ -474,4 +486,5 @@ def test_bound_card_keeps_four_option_cap_and_duplicate_actions_are_collapsed(ch
     )
     repeated = answer(send(chat, cid, "换个讨论角度", "repeat"))
     assert len(repeated["actions"]) == 1
-    assert len(repeated["suggested_replies"]) == 1
+    # A valid single operation no longer needs an unrelated filler reply.
+    assert repeated["suggested_replies"] == []

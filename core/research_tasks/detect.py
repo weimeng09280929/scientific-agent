@@ -132,6 +132,13 @@ def classify_search_request(text: str) -> SearchIntent:
     action = _ACTION.search(detectable)
     if not action:
         return SearchIntent(reason="未发现明确的检索动作词")
+    # 检索/搜索也常是研究对象的名词（“信息检索方向”“两个检索模块”）。
+    # 只有这种歧义词时，要求明确动词语气；其余已有明确查找入口保持原契约。
+    matches=list(_ACTION.finditer(detectable))
+    if all(m.group(0) in ('检索','搜索') for m in matches) and not re.search(
+        r'^\s*(?:检索|搜索)(?!模块|方法|系统|方向|领域|任务|效果|算法|引擎)'
+        r'|(?:请(?:你|帮我|给我)?|帮我|替我|开始|现在|进行|执行|我想(?:要)?|我要)\s*(?:先|再|重新|去)?\s*(?:检索|搜索)', detectable):
+        return SearchIntent(reason='提及检索研究对象，未明确授权发起检索，保留讨论')
     if _READ_LOCAL.search(cleaned) and len(cleaned) < 60:
         return SearchIntent(reason="指向已有本地材料，不重复外检")
 

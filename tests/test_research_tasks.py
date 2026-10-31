@@ -803,6 +803,7 @@ def test_task_does_not_touch_pipeline_state(rt):
         "sra_chat_requests",
         "sra_chat_suggestions",
         "sra_chat_meta",
+        "sra_chat_failures",  # P1 持久失败原因/恢复约定，属于会话表，不是流水线状态。
         "sqlite_sequence",
     }
 

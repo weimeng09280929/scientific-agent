@@ -157,6 +157,7 @@ class WorkspaceService:
     def save_brief(self, brief: Brief, expected_revision: int) -> Workspace:
         def change(workspace: Workspace) -> None:
             if workspace.brief != brief:
+                workspace.brief_revision = workspace.revision + 1
                 for item in workspace.items:
                     if item.status == "active" and item.kind != "note":
                         item.needs_review = True

@@ -3,6 +3,7 @@
     "use strict";
     const pages = {
         dashboard: {title:"科研对话", area:"overview"},
+        "project-overview": {title:"项目总览", area:"overview"},
         create: {title:"我的项目", area:"overview"},
         "topic-discovery": {title:"选题探索", area:"question"},
         papers: {title:"文献与资料", area:"literature"},

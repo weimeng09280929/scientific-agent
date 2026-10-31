@@ -5,6 +5,7 @@ No schema setup, migrations, model calls or recovery writes are allowed here.
 import json
 
 from core.research_tasks.service import ResearchTaskService
+from core.research_tasks.report_status import report_status
 
 
 def material_counts(chat):
@@ -68,6 +69,17 @@ def reports(chat, base):
         fields="r.task_id,r.conversation_id,r.topic,r.status,r.basis_changed,r.created_at,r.finished_at"
         if versions:
             fields+=",json_extract(v.value,'$.version') AS version,json_extract(v.value,'$.status') AS version_status,json_extract(v.value,'$.delivered_at') AS delivered_at,json_extract(r.report_versions,'$[#-1].version') AS current_version"
+        # Extract only scalar content metadata. A historical entry must never
+        # fall back to the latest task's mode or failure note.
+        mode = "COALESCE(json_extract(v.value,'$.report.mode'),json_extract(v.value,'$.mode'))" if versions else 'NULL'
+        note = "json_extract(v.value,'$.synthesis_note')" if versions else 'NULL'
+        kind = "json_extract(v.value,'$.report.catalog_kind')" if versions else 'NULL'
+        task_note = 'r.synthesis_note' if 'synthesis_note' in columns else 'NULL'
+        has_version = "v.value IS NOT NULL" if versions else '0'
+        task_mode = 'r.mode' if 'mode' in columns else 'NULL'
+        fields+=f",CASE WHEN {has_version} THEN {mode} ELSE COALESCE(json_extract(r.report,'$.mode'),{task_mode}) END AS content_mode"
+        fields+=f",CASE WHEN {has_version} THEN {note} ELSE {task_note} END AS content_note"
+        fields+=f",CASE WHEN {has_version} THEN {kind} ELSE json_extract(r.report,'$.catalog_kind') END AS catalog_kind"
         join=" LEFT JOIN json_each(CASE WHEN json_valid(r.report_versions) THEN r.report_versions ELSE '[]' END) v" if versions else ''
         rows = [dict(r) for r in conn.execute(f"SELECT {fields} FROM sra_research_tasks r{join} WHERE r.project_id=? AND r.report IS NOT NULL AND r.report!='null' ORDER BY r.created_at DESC,r.task_id DESC"+(",v.key DESC" if versions else ''), (chat.project_id,))]
     result = []
@@ -75,6 +87,8 @@ def reports(chat, base):
         version = task.get("version")
         latest = version == task.get("current_version") or version is None
         status = task.get("version_status") or task["status"]
+        content = report_status(status,task.get("content_mode"),task.get("content_note"),task.get("catalog_kind"))
+        content["status_label"] = ("待复核 · " if task["basis_changed"] else "") + content["status_label"]
         result.append({"key": f"research-task:{task['task_id']}"+(f":{version}" if not latest else ""),
                 "project_id": chat.project_id, "task_id": task["task_id"],
                 "conversation_id": task["conversation_id"], "title": "研究现状整理："+task["topic"],
@@ -82,7 +96,8 @@ def reports(chat, base):
                 "group": "current" if latest else "history", "version": version,
                 "created_at": task.get("delivered_at") or task["finished_at"] or task["created_at"],
                 "status": status, "basis_changed": bool(task["basis_changed"]),
-                "status_label": ("待复核 · " if task["basis_changed"] else "")+{"partial":"部分完成", "completed":"已完成", "failed":"整理失败，已有报告保留", "cancelled":"已取消，已有报告保留"}.get(status,status),
+                **content,
+                "review_label": "待复核" if task["basis_changed"] else "",
                 "url": base+"/research-tasks/"+task["task_id"]+"/export"+(f"?version={version}" if version is not None else ""),
                 "formats": ["md"]})
     return result

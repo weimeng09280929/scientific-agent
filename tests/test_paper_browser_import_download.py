@@ -39,16 +39,26 @@ def test_imported_arxiv_paper_can_download_pdf(monkeypatch, tmp_path):
 
     pdf_bytes = b"%PDF-1.4\n" + b"0" * 1100
     requested = []
+    closed = []
 
     def fake_get(url, **kwargs):
         requested.append(url)
-        return SimpleNamespace(raise_for_status=lambda: None, content=pdf_bytes)
+        assert kwargs.get("stream") is True
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            iter_content=lambda chunk_size: (
+                pdf_bytes[start:start + chunk_size]
+                for start in range(0, len(pdf_bytes), chunk_size)
+            ),
+            close=lambda: closed.append(url),
+        )
 
     monkeypatch.setattr(requests, "get", fake_get)
     response = api.download_paper_pdf("test", paper.paper_id)
     assert response.media_type == "application/pdf"
     assert Path(response.path).read_bytes() == pdf_bytes
     assert requested == ["https://arxiv.org/pdf/2401.12345.pdf"]
+    assert closed == requested
     assert store.get_paper(paper.paper_id).pdf_path == response.path
 
 

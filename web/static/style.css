@@ -5270,3 +5270,22 @@ pre.code-block {
     .ppl-target { background: rgba(46, 160, 92, 0.18); color: #7ee2a8; }
     .route-goal-reason { background: rgba(255, 255, 255, 0.06); }
 }
+/* Local account entry, deliberately separate from the existing workbench. */
+.account-gate {min-height:100vh;display:grid;place-items:center;background:#eef2f7;padding:24px;box-sizing:border-box}
+.account-gate[hidden],.app[hidden],#account-controls[hidden] {display:none!important}
+.account-card {width:min(100%,390px);padding:30px;border-radius:14px;background:#fff;color:#19324f;box-shadow:0 12px 40px #1832511c;display:grid;gap:14px}
+.account-card h1 {margin:0;font-size:25px}.account-card p {margin:0;color:#56677a}
+.account-card label {display:grid;gap:6px;font-size:14px}.account-card input {box-sizing:border-box;width:100%;padding:11px;border:1px solid #aebdcb;border-radius:7px;font:inherit}
+.account-card button {border:0;border-radius:7px;background:#173d66;color:#fff;padding:12px;font:inherit;cursor:pointer}
+#account-controls {display:grid;gap:5px;margin-top:8px;color:#c6d5e5;font-size:12px;overflow-wrap:anywhere}
+#account-logout {justify-self:start;background:transparent;border:1px solid #92a9c2;color:inherit;border-radius:5px;padding:4px 9px;cursor:pointer}
+.account-card [hidden] {display:none!important}
+.account-card .account-switch {background:transparent;color:#173d66;border:1px solid #bccbdb;padding:9px}
+.account-card .account-help {font-size:12px;line-height:1.65;color:#52677e}
+.account-password-field {display:grid;gap:6px}
+.account-password-control {position:relative}
+.account-card .account-password-control input {padding-right:51px}
+.account-card .account-password-toggle {position:absolute;right:1px;top:1px;bottom:1px;width:44px;padding:0;display:grid;place-items:center;border-radius:0 6px 6px 0;background:transparent;color:#52677e}
+.account-card .account-password-toggle:hover {background:#edf3f9;color:#173d66}
+.account-card .account-password-toggle:focus-visible {outline:2px solid #32679c;outline-offset:2px}
+.account-password-toggle[aria-pressed="false"] .password-eye-slash {display:none}

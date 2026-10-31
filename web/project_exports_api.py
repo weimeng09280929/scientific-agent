@@ -19,12 +19,8 @@ def artifact_text(artifact, root):
     if artifact.content is not None:
         return str(artifact.content)
     if artifact.content_path:
-        path = Path(artifact.content_path)
-        if not path.is_absolute():
-            local = root / path
-            original = root.parent.parent.parent / path
-            path = local if local.is_file() else original
-        path = path.resolve()
+        from core.storage_paths import project_file
+        path = project_file(artifact.content_path, root.parent)
         if path.is_relative_to(root.resolve()) and path.is_file():
             try:
                 return path.read_text(encoding="utf-8")

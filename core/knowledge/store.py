@@ -189,11 +189,12 @@ CREATE TABLE IF NOT EXISTS kv_store (
 class KnowledgeStore:
     """知识库存储。线程安全（每线程独立连接，写操作加锁）。"""
 
-    def __init__(self, db_path: Path, *, read_only: bool = False):
+    def __init__(self, db_path: Path, *, read_only: bool = False, initialize: bool = True):
         self._db_path = Path(db_path)
         self._read_only = read_only
+        self._existing_only = not initialize
         self._lock = threading.RLock()
-        if not read_only:
+        if not read_only and initialize:
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._init_schema()
 
@@ -222,7 +223,10 @@ class KnowledgeStore:
         # tables. mode=ro also prevents accidental writes and missing-DB creation.
         conn = (
             sqlite3.connect(self._db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30.0)
-            if self._read_only else sqlite3.connect(self._db_path, timeout=30.0)
+            if self._read_only else (
+                sqlite3.connect(self._db_path.resolve().as_uri() + "?mode=rw", uri=True, timeout=30.0)
+                if self._existing_only else sqlite3.connect(self._db_path, timeout=30.0)
+            )
         )
         conn.row_factory = sqlite3.Row
         try:

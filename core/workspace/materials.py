@@ -22,10 +22,8 @@ def text_content(artifact, project_dir: Path) -> str:
         return artifact.content[:200000]
     if not artifact.content_path:
         return ""
-    path = Path(artifact.content_path)
-    if not path.is_absolute():
-        path = project_dir.parent.parent / path
-    path = path.resolve()
+    from core.storage_paths import project_file
+    path = project_file(artifact.content_path, project_dir)
     root = (project_dir / "artifacts").resolve()
     if not path.is_relative_to(root) or path.suffix.lower() not in (".md", ".txt"):
         return ""

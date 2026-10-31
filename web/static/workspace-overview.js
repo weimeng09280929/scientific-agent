@@ -75,5 +75,65 @@
         function mountHistory(){root.remove();mount(host,'history',app);}
         load();
     }
-    window.SRA_WORKSPACE_VIEW={mount};
+    function mountOverview(host,app){
+        const route=app.getRoute(),pid=route.projectId,cid=route.conversationId;
+        const root=E('section','','project-overview'),heading=E('h1','正在读取项目…'),body=E('div'),feedback=E('div');
+        root.setAttribute('aria-label','项目总览');feedback.setAttribute('role','status');
+        const active=()=>root.isConnected&&app.getRoute().projectId===pid&&app.getRoute().page==='project-overview';
+        root.append(E('p','项目总览','po-eyebrow'),heading,feedback,body);host.append(root);
+        if(!pid){heading.textContent='尚未选择项目';feedback.append(E('p','请从侧栏选择已有项目。浏览总览不会建立项目或对话。'));return;}
+        const base='/api/projects/'+encodeURIComponent(pid);
+        let busy=false;
+        const section=(title,key)=>{const n=E('section','','card po-section');n.dataset.section=key;n.append(E('h2',title,'card-title'));return n;};
+        const go=page=>app.navigate({projectId:pid,page});
+        const excerpt=text=>text.length>240?text.slice(0,240)+'…':text;
+        async function load(){
+            if(busy||!active())return;busy=true;root.dataset.loaded='false';body.replaceChildren();feedback.replaceChildren(E('p','正在读取已有材料…','muted'));
+            try{
+                const [data,plans,notes,recent,original]=await Promise.all([
+                    get(base+'/workspace?include_chat=false'),get(base+'/workspace/materials?kind=plans&limit=3'),
+                    get(base+'/notes'),get(base+'/conversations?limit=1'),cid?get(base+'/conversations/'+encodeURIComponent(cid)):Promise.resolve(null)
+                ]);
+                if(!active())return;
+                if(data.workspace?.project_id!==pid||plans.project_id!==pid||original&&original.conversation?.project_id!==pid)throw new Error('项目与材料归属不一致，请重新选择项目。');
+                const w=data.workspace,flow=data.workflow.flow,brief=w.brief||{},question=flow.question;
+                heading.textContent=data.project.display_name||data.project.topic;
+                const intro=section('项目简介','intro');
+                if(brief.goal?.trim())intro.append(E('p','已保存的研究目标：'+excerpt(brief.goal)));
+                else if(question)intro.append(E('p',(question.needs_review?'已保存的问题（待复核）：':'已确认的研究问题：')+question.title));
+                else intro.append(E('p','项目简介尚未完善，可以在对话中逐步明确研究目标与条件。','muted'));
+                body.append(intro);
+                const background=section('项目背景','background');
+                window.SRA_PROJECT_BACKGROUND.view(background,{projectId:pid,workspace:w,app,onSaved:()=>{if(active())return load();}});body.append(background);
+                const status=section('当前研究状态','status');
+                status.append(E('p',plans.progress.label,'po-state'));
+                status.append(E('p',flow.planReady?'已明确采纳研究问题和方案；可以继续审阅、讨论修改。':question?(question.needs_review?'正式问题需要复核；已有草案不代表方案已经采纳。':'已明确采纳研究问题；方案草案仍须单独审阅和采纳。'):plans.drafts.length?'已有方案草案，尚未明确采纳当前研究问题与方案。':recent.conversations.length?'正在讨论研究目标与问题；对话中的候选内容须明确采纳。':'尚未开始讨论；浏览总览不代表研究阶段已经完成。'));
+                status.append(E('p',flow.next?.text||data.next_step,'muted'),E('p',plans.progress.notice,'muted small'));body.append(status);
+                const materials=section('已有资料与成果','materials'),grid=E('div','','po-materials');
+                function card(title,description,label,action){const n=E('article','','po-material');n.append(E('h3',title),E('p',description),btn(label,action));grid.append(n);return n;}
+                card('文献与资料',`已入库 ${data.papers.length} 篇。数量只表示已保存，不表示全部已阅读。`,'查看文献与资料',()=>go('papers'));
+                const savedNotes=(notes.notes||[]).length+w.items.filter(i=>i.kind==='note'&&i.status==='active').length;
+                card('已保存笔记',`已保存 ${savedNotes} 条笔记。聊天正文不会自动成为笔记。`,'查看笔记',()=>go('notes'));
+                const q=card('研究问题',question?(question.needs_review?'正式记录 · 待复核：':'已明确采纳：')+question.title:'当前尚未明确采纳研究问题；候选内容可返回对话核对。','查看研究问题',()=>go('gaps'));
+                if(question&&question.content)q.append(E('p',excerpt(question.content),'muted small'));
+                const formal=card('正式方案',plans.entries.length?'以下是已保存的正式版本；与未采纳草案分开。':'尚无正式方案。','查看全部方案与版本',()=>go('experiments'));
+                for(const item of plans.entries){const row=E('div','','po-record');row.append(E('p',item.title),E('small',[item.label||'正式记录',item.version!=null?'版本 '+item.version:'',item.status_label].filter(Boolean).join(' · ')),btn('审阅正式方案',()=>window.SRA_CONVERSATIONS.showPlan(pid,item.key.slice(5))));formal.append(row);}
+                if(plans.next_offset!=null)formal.append(E('p','仅列出最近 3 条，全部版本见方案目录。','muted small'));
+                const drafts=card('方案草案',plans.drafts.length?'未采纳草案；不会替代正式方案。':'当前没有未采纳方案草案。','查看草案目录',()=>go('experiments'));
+                for(const item of plans.drafts){const row=E('div','','po-record');row.append(E('p',item.title+' · 未采纳草案'),E('small',item.basis_changed?'依据需复核，不能直接采纳。':'待用户审阅和明确采纳。'),btn('回原对话审阅草案',()=>window.SRA_CONVERSATIONS.showProposal(pid,item.conversation_id,item.suggestion_id)));drafts.append(row);}
+                if(plans.draft_next_offset!=null)drafts.append(E('p','仅列出最近 3 条，其他草案见方案目录。','muted small'));
+                card('研究现状报告',`已保存 ${data.material_counts.research_reports} 份报告，内容状态与阅读范围见原报告。`,'查看研究现状报告',()=>go('research-report'));
+                materials.append(grid);body.append(materials);
+                const next=section('继续研究','continue'),conversation=original?.conversation||recent.conversations[0];
+                if(conversation){next.append(E('p','继续讨论：'+conversation.title),btn(cid?'返回刚才的对话':'继续最近对话',()=>app.navigate({projectId:pid,conversationId:conversation.conversation_id,page:'dashboard'})));}
+                else next.append(E('p','尚无对话。可以在本项目开始一次新讨论；只有明确发送才保存新会话。','muted'));
+                next.append(btn('在本项目新建对话',()=>app.navigate({projectId:pid,conversationId:null,page:'dashboard'})),btn('刷新项目总览',()=>load()));body.append(next);
+                feedback.replaceChildren();root.dataset.loaded='true';
+                window.dispatchEvent(new CustomEvent('sra:workspace-loaded',{detail:{projectId:pid,workflow:data.workflow,counts:data.counts,material_counts:data.material_counts}}));
+            }catch(e){if(active()){heading.textContent='项目总览';feedback.replaceChildren(E('p','项目总览暂时无法读取','ch-warning'),E('p',e.message,'muted'),btn('重新读取项目总览',()=>load()));}}
+            finally{busy=false;}
+        }
+        load();
+    }
+    window.SRA_WORKSPACE_VIEW={mount,mountOverview};
 })();

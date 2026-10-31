@@ -58,6 +58,7 @@ class ConversationSend(Contract):
     selected_item_id: str | None = Field(default=None, max_length=200)
     selected_paper_ids: list[str] = Field(default_factory=list, max_length=3)
     plan_request: PlanRequest | None = None
+    recovery_of: str | None = Field(default=None, max_length=128)  # Server-created round only.
     reading_purpose: Literal[
         "orientation", "method", "comparison", "innovation", "troubleshooting"
     ] = "orientation"
@@ -72,6 +73,11 @@ class ConversationSend(Contract):
 
 class ConversationRetry(Contract):
     expected_revision: int | None = Field(default=None, ge=0)
+    wait_for_completion: bool = True
+
+
+class ConversationRestart(Contract):
+    acknowledge_model_cost: bool
     wait_for_completion: bool = True
 
 

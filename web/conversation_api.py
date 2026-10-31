@@ -19,6 +19,7 @@ from core.workspace.conversation_schema import (
     ConversationPatch,
     ConversationSend,
     ConversationRetry,
+    ConversationRestart,
     ConversationApply,
 )
 
@@ -55,6 +56,10 @@ def build_conversation_router(config, require_project, generator, task_starter=N
         )
 
     def fail(exc):
+        from core.workspace.conversation_moves import ConversationMoved
+        if isinstance(exc,ConversationMoved):
+            from web.conversation_move_api import moved_error
+            moved_error(exc,config.paths,require_project)
         raise HTTPException(
             status_code=(
                 503
@@ -167,6 +172,8 @@ def build_conversation_router(config, require_project, generator, task_starter=N
     def send(project_id: str, conversation_id: str, request: ConversationSend):
         s, project = service(project_id)
         try:
+            if request.recovery_of is not None:
+                raise WorkspaceError("恢复请求须使用服务端的新一轮入口")
             from core.workspace.teaching import teaching_identity, TeachingService
 
             if teaching_identity(s):
@@ -223,6 +230,23 @@ def build_conversation_router(config, require_project, generator, task_starter=N
                     search_available=task_starter is not None,
                 )
             )
+        except (WorkspaceError, ValueError) as exc:
+            fail(exc)
+
+    @router.post(
+        "/{project_id}/conversations/{conversation_id}/requests/{request_id}/restart"
+    )
+    def restart(project_id: str, conversation_id: str, request_id: str,
+                request: ConversationRestart):
+        s, project = service(project_id)
+        try:
+            normalize_public_domain(project.domain)
+            return result_response(s.restart(
+                conversation_id, request_id, project.topic, generator(project),
+                acknowledge_model_cost=request.acknowledge_model_cost,
+                wait_for_completion=request.wait_for_completion,
+                search_available=task_starter is not None,
+            ))
         except (WorkspaceError, ValueError) as exc:
             fail(exc)
 

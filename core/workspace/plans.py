@@ -187,19 +187,8 @@ def build_plan_context(service, workspace, context, text, req):
                     clarification="问题关联的论文不可用，请先核对来源，不自动补造依据。",
                 )
                 continue
-            context["papers"].append(
-                {
-                    "paper_id": pid,
-                    "title": p.title,
-                    "abstract": (p.abstract or "")[:1200],
-                    "scope": p.metadata.get("reading_scope")
-                    or "已存摘要和片段，不保证全文",
-                    "excerpts": [
-                        {"text": c.text[:1000], "page": c.page}
-                        for c in service.store.get_paper_chunks(pid)[:2]
-                    ],
-                }
-            )
+            from core.workspace.guide import provided_paper
+            context["papers"].append(provided_paper(p,service.store.get_paper_chunks(pid)[:2]))
     return result
 
 
@@ -208,6 +197,7 @@ PLAN_PROMPT = """【理工科方案生成 stem-plan-v1】
 plan.method 与指定方法相同，question_id 使用本次明确的问题；related_ids 只关联该问题，supersedes_id 原样使用指定修订目标。不要新建问题，不自动采纳。
 九个章节 sections 各一次：objective,related_work,hypothesis,conditions,method,validation,feasibility,limitations,references。每个 statements 填 text,basis(literature/user/proposal/unverified),paper_ids,quote。
 literature 必须有本次实际提供的摘要或片段逐字 quote 和 paper_id，元信息不能支撑方法、结果或研究空白；不能根据论文目录编造结论。user 的 quote 必须是 brief、正式问题或本会话用户原文，不能虚构设备/期限/预算/权限。proposal 是待讨论建议；unverified 明示待核实。
+每条 statement 只写一种依据性质。basis=user 的 text 只转述 quote 中已确认事实，不附加建议数量、安排、因果解释或尚未确认的任务；这些另写 basis=proposal/unverified。basis=literature 只描述引用片段所述，跨文献推断和方法建议另写 proposal/unverified，不继承文献事实标签。资源、期限、预算、权限、数量与否定限定必须保留，不确定则列入待确认。
 conditions 的 resources/time_budget/budget/data_access 均填写 value,basis(user/unverified),quote；未知用 value=待确认,basis=unverified,quote=空，不填精确假数字。即便理论研究不涉及数据，也不强制填训练集；可待用户确认不涉及。
 已知条件的 quote 必须直接复制用户原文，value 直接摘取 quote 中的连续原文，不自行改写、推算或翻译（例如用户写四周，就不要写一个月）。不确定如何对应时标待确认。
 method_details 按类型填写全部必需字段：计算研究(data_task,baselines,comparisons,budget,evaluation,reproducibility)；理论研究(definitions,assumptions,propositions,derivation_route,proof_obligations,counterexamples,boundaries,related_theory)，新命题明确待论证，不强塞准确率、训练数据或代码；实验研究设计(research_object,variables,controls,measurements,repetition_error,resource_needs,professional_review)，只规划，具体操作参数不能臆造，须专业审核。
@@ -221,7 +211,7 @@ def user_basis(context, text):
         [
             text,
             *[str(v) for v in context.get("brief", {}).values()],
-            *[m["content"] for m in context.get("history", []) if m["role"] == "user"],
+            *[m["content"] for m in context.get("history", []) if m["role"] == "user" and not m.get('background_outdated')],
             (context.get("plan_generation", {}).get("question") or {}).get(
                 "content", ""
             ),
@@ -253,6 +243,36 @@ def _literal(text):
     return re.sub(r"\s+", "", text.translate(width))
 
 
+def _claim_literal(value):
+    """Conservative attribution check, not a semantic entailment engine."""
+    value = _literal(value).lower()
+    value = re.sub(r"^(?:用户(?:已确认|明确表示|提供|说|的)?|我的|我)", "", value)
+    value = re.sub(r"^(?:硬件条件|资源条件|时间条件|研究期限|期限|预算条件|数据权限|编程基础)(?:为|是)?[:：]?", "", value)
+    value = re.sub(r"^(?:为|是|有)", "", value)
+    value = value.replace("不具备", "无").replace("暂无", "无").replace("没有", "无")
+    value = value.replace("仅有", "只有").replace("仅使用", "只有")
+    return re.sub(r"[，,。；;：:、\s]", "", value)
+
+
+def _validate_user_statement(statement):
+    claim = _claim_literal(statement.text)
+    supported = {_claim_literal(statement.quote)} | {
+        _claim_literal(part) for part in re.split(r"[，,。；;\n]", statement.quote) if part.strip()
+    }
+    # A literal excerpt or a narrow synonym is auditable. If the model adds a
+    # task, quantity or interpretation, it must make a separate proposal.
+    if not claim or claim not in supported:
+        raise WorkspaceError("标为用户提供的方案陈述超出了所附原话；请拆分用户事实与系统建议后重新生成，未保存草案")
+
+
+def _positive_gpu_claim(value):
+    for match in re.finditer(r"(?:有|可用|使用|依赖|具备|需要)\s*GPU|GPU\s*(?:可用|训练)", value, re.I):
+        prefix = value[max(0, match.start() - 5):match.start()]
+        if not re.search(r"(?:不|无|没|无需|不能|避免)\s*$", prefix):
+            return True
+    return False
+
+
 def validate_plan(plan: ResearchPlan, context, text):
     pg = context.get("plan_generation", {})
     if pg and (
@@ -270,6 +290,12 @@ def validate_plan(plan: ResearchPlan, context, text):
         for s in section.statements:
             if not s.text.strip() or not set(s.paper_ids) <= set(plan.references):
                 raise WorkspaceError("方案陈述为空或引用未列入参考来源")
+            if s.basis != "user" and re.search(
+                r"用户(?:已确认|明确表示|已同意|提供|期限|拥有|具备)", s.text
+            ):
+                raise WorkspaceError("用户事实不能在系统建议或文献陈述中借用已确认标签")
+            if re.search(r"(?:无|没有|不能使用)\s*GPU|(?:仅|只有)\s*CPU", known, re.I) and _positive_gpu_claim(s.text):
+                raise WorkspaceError("方案陈述与用户明确的无 GPU 条件冲突")
             if s.basis == "literature":
                 if not s.paper_ids or not s.quote.strip():
                     raise WorkspaceError("文献事实必须附实际依据片段")
@@ -284,8 +310,14 @@ def validate_plan(plan: ResearchPlan, context, text):
                             "文献依据不在提供的摘要／正文片段中；元信息不能支持内容结论"
                         )
                 evidence.append(s.quote)
+                if re.search(r"因此|由此(?:可见|推断)|意味着|可以推断|建议|我们认为", s.text) and not re.search(
+                    r"因此|由此(?:可见|推断)|意味着|可以推断|建议|我们认为", s.quote
+                ):
+                    raise WorkspaceError("文献事实混入系统推断或建议，请拆为独立陈述")
             elif s.basis == "user" and (not s.quote.strip() or s.quote not in known):
                 raise WorkspaceError("用户条件没有对应的已提供原文")
+            elif s.basis == "user":
+                _validate_user_statement(s)
             elif s.basis != "literature" and re.search(
                 r"实验结果(?:表明|显示)|我们(?:已取得|已经证明|已验证)|准确率达到了|已经实现了",
                 s.text,
@@ -496,5 +528,5 @@ def completeness(plan):
             for section in plan.sections
             for s in section.statements
         ),
-        "notice": "仅检查结构与已提供依据，不证明科学正确性、创新性或可发表性",
+        "notice": "仅检查结构与已提供依据；历史方案可能按较早规则生成，读取时不重验或改写正文归属。不证明科学正确性、创新性或可发表性",
     }

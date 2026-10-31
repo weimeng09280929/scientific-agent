@@ -153,9 +153,11 @@
         box.append(el("div", { class: "button-row" }, [el("a", { class: "button-link", href: "/", target: "_blank", rel: "noopener" }, "打开现有检索与导入 ↗"), el("button", { type: "button", onclick: () => refresh() }, "刷新文献库")]));
         const upload = el("form"), file = el("input", { type: "file", accept: ".pdf,.txt,.md", required: true }), uploadButton = el("button", { type: "submit" }, "导入本地论文");
         upload.append(el("label", {}, ["也可以直接上传 PDF、TXT 或 Markdown", file]), uploadButton);
+        const hint=el("p",{class:"small muted"});upload.append(hint);window.SRA_RESOURCES?.hint(hint);
         upload.addEventListener("submit", async event => {
             event.preventDefault(); const pid = state.projectId; const body = new FormData(); body.append("file", file.files[0]); uploadButton.disabled = true; uploadButton.textContent = "正在解析导入…";
             try {
+                await window.SRA_RESOURCES?.checkFile(file.files[0]);
                 const response = await fetch(`/api/projects/${encodeURIComponent(pid)}/upload-paper`, { method: "POST", body });
                 const result = await response.json(); if (!response.ok) throw new Error(result.detail || "导入失败");
                 if (pid === state.projectId) await refresh(); notify(`已导入；可用文本片段 ${result.chunks || 0} 条，请核对解析范围`);

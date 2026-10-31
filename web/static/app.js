@@ -760,7 +760,7 @@
 
     function renderPage(preserveScroll = false) {
         window.SRA_CONVERSATIONS?.leave();
-        if(state.currentPage==="dashboard") stopPolling();
+        if(["dashboard","project-overview"].includes(state.currentPage)) stopPolling();
         else if(state.currentProjectId && !state.pollTimer) startPolling();
         publishGuideContext();
         const host = document.getElementById("content");
@@ -774,7 +774,7 @@
         renderFlowNav();
 
         // 保留旧笔记计数同步；统一入口位于上方「笔记」，不再展示重复编辑器。
-        if(state.currentPage!=="dashboard") {renderSidebarNotes();renderSidebarDownload();}
+        if(!["dashboard","project-overview"].includes(state.currentPage)) {renderSidebarNotes();renderSidebarDownload();}
 
         if (state.currentPage !== "create" && state.currentPage !== "dashboard"
             && state.currentPage !== "reading-method" && state.currentPage !== "writing-method"
@@ -786,6 +786,7 @@
 
         switch (state.currentPage) {
             case "dashboard": renderDashboard(content); break;
+            case "project-overview": window.SRA_WORKSPACE_VIEW.mountOverview(content,window.__sraApp); break;
             case "create": renderCreate(content); break;
             case "topic-discovery": renderTopicDiscovery(content); break;
             case "progress": renderProgress(content); break;
@@ -1698,6 +1699,8 @@
                 papersOnly ? "支持 PDF、UTF-8 TXT/MD；只依据实际提取的片段讨论，解析失败不会冒充已阅读。" : "支持上传 PDF/TXT/MD 格式的文献（入库为 Paper 实体），或上传主题描述文件覆盖当前研究主题。"),
         ]);
 
+        const resourceHint = el("p", {class:"muted small",role:"status"});
+        card.appendChild(resourceHint);window.SRA_RESOURCES?.hint(resourceHint);
         // 上传文献
         const paperSection = el("div", { class: "upload-section" }, [
             el("div", { class: "field-label" }, "上传文献"),
@@ -1746,6 +1749,7 @@
             paperBtn.disabled = true;
             paperBtn.textContent = "上传中…";
             try {
+                await window.SRA_RESOURCES?.checkFile(paperFile.files[0]);
                 const capabilities=await window.SRA_CONVERSATIONS?.capabilities();
                 if(!capabilities?.upload_request_identity){uploadStatus.textContent="当前后端尚未加载上传重试保护，请更新后端后再上传；本次未发送文件。";return;}
                 if(capabilities?.upload_request_identity){
@@ -1776,7 +1780,7 @@
                     if(state.currentProjectId===uploadProjectId && card.isConnected)showToast("上传失败：" + (data.detail || "未知错误"), "error");
                 }
             } catch (e) {
-                uploadStatus.textContent="响应未确认："+e.message+"。请点击核对上次上传，不会自动重发或重新解析。";
+                uploadStatus.textContent="上传未完成："+e.message+"。请点击核对上次上传，不会自动重发或重新解析。";
             } finally {
                 paperBtn.disabled = false;
                 paperBtn.textContent = "上传文献";
@@ -1807,6 +1811,7 @@
             topicBtn.disabled = true;
             topicBtn.textContent = "上传中…";
             try {
+                await window.SRA_RESOURCES?.checkFile(topicFile.files[0]);
                 const resp = await fetch(
                     `/api/projects/${state.currentProjectId}/upload-topic`,
                     { method: "POST", body: fd }
@@ -5710,5 +5715,6 @@
         }
     }
 
-    document.addEventListener("DOMContentLoaded", init);
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init, {once:true});
+    else init();
 })();

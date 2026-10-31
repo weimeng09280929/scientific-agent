@@ -381,7 +381,12 @@ def test_another_live_process_is_not_treated_as_interrupted(chat):
     )
 
 
-def test_concurrent_requests_isolate_conversations_and_no_sql_transaction_waits(chat):
+def test_concurrent_requests_isolate_conversations_and_no_sql_transaction_waits(chat, monkeypatch):
+    # Exercise independent conversations within an explicitly configured cap.
+    # The new account-wide cap is separately checked through the real auth app.
+    from dataclasses import replace
+    from core.resource_limits import RESOURCES
+    monkeypatch.setattr(RESOURCES, "limits", replace(RESOURCES.limits, heavy_user=2))
     a = create(chat)
     b = create(chat)
     entered = threading.Event()

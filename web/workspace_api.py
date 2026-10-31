@@ -248,10 +248,8 @@ def build_workspace_router(
             content = artifact.content
             issue = None
             if content is None and artifact.content_path:
-                path = Path(artifact.content_path)
-                if not path.is_absolute():
-                    path = config.paths.root / path
-                path = path.resolve()
+                from core.storage_paths import project_file
+                path = project_file(artifact.content_path, config.paths.project_dir(project_id), data_root=config.paths.root)
                 # 不允许元数据将浏览接口变成任意文件读取入口。
                 if not path.is_relative_to(root) or path.suffix.lower() not in (
                     ".txt",

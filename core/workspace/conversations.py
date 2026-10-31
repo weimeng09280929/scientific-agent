@@ -67,7 +67,45 @@ DDL = [
        suggestion_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
        request_id TEXT, material_fingerprint TEXT, data TEXT NOT NULL)""",
     "CREATE TABLE IF NOT EXISTS sra_chat_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)",
+    """CREATE TABLE IF NOT EXISTS sra_chat_failures (
+       conversation_id TEXT NOT NULL, request_id TEXT NOT NULL, reason TEXT NOT NULL,
+       retry_at REAL, PRIMARY KEY(conversation_id,request_id))""",
 ]
+
+
+def failure_reason(exc):
+    """Classify the original transport/validation cause, not its LLM wrapper."""
+    from core.invocation_audit import CallLimitError
+    from core.llm.base import LLMTruncatedError
+    seen = set()
+    current = exc
+    while current and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, CallLimitError):
+            return current.reason, current.retry_after_seconds
+        name = type(current).__name__
+        status = getattr(current, "status_code", None)
+        if status in (401, 403):
+            return "authentication", None
+        if status == 429:
+            from core.tools.search_result import retry_delay
+            response = getattr(current, "response", None)
+            return "rate_limited", retry_delay(response.headers.get("Retry-After")) if response is not None else None
+        if name in ("APITimeoutError", "TimeoutError", "ConnectTimeout", "ReadTimeout"):
+            return "timeout", None
+        if name in ("APIConnectionError", "ConnectError", "RemoteProtocolError"):
+            return "connection_error", None
+        if isinstance(current, LLMTruncatedError):
+            return "structure_invalid", None
+        if name in ("ValidationError", "JSONDecodeError", "SynthesisValidationError"):
+            return "structure_invalid", None
+        if name == "LLMError" and any(mark in str(current) for mark in
+                                       ("不符合 schema", "非合法 JSON", "schema 定义本身")):
+            return "structure_invalid", None
+        current = current.__cause__ or current.__context__
+    if isinstance(exc, WorkspaceError) or "Validation" in type(exc).__name__:
+        return "structure_invalid", None
+    return "generation_failed", None
 
 
 class ConversationNotFound(WorkspaceError):
@@ -228,6 +266,9 @@ class ConversationService:
         )
         if row:
             return self._discussion_meta(conn, dict(row))
+        from core.workspace.conversation_moves import moved_target, ConversationMoved
+        moved=moved_target(conn,self.project_id,cid)
+        if moved:raise ConversationMoved(moved['target_project_id'],cid)
         w = self._workspace(conn)
         if cid == self.legacy_id and w.messages and not self._has_tables(conn):
             return self._default(w)
@@ -241,6 +282,9 @@ class ConversationService:
                                ("discussion_step:" + data["conversation_id"],)).fetchone()
             if row:
                 data["discussion_step"] = row[0]
+        from core.workspace.conversation_moves import history
+        moves=history(conn,data['conversation_id'])
+        if moves:data['movement_history']=[{k:m[k] for k in ('move_id','generation','source_project_id','target_project_id','source_name','target_name','created_at')} for m in moves]
         return data
 
     def research_route(self, cid, topic):
@@ -348,6 +392,7 @@ class ConversationService:
         signature = fingerprint(values)
         step = values.pop("discussion_step", None)
         with self._connection() as conn:
+            self._check_moved_create(conn,request.request_id)
             existing = (
                 conn.execute(
                     "SELECT * FROM sra_conversations WHERE project_id=? AND create_request_id=?",
@@ -364,6 +409,7 @@ class ConversationService:
         basis = self.material_state()
         with self._connection(True) as conn:
             self._ensure(conn, basis)
+            self._check_moved_create(conn,request.request_id)
             existing = conn.execute(
                 "SELECT * FROM sra_conversations WHERE project_id=? AND create_request_id=?",
                 (self.project_id, request.request_id),
@@ -389,6 +435,12 @@ class ConversationService:
                 conn.execute("INSERT INTO sra_chat_meta(key,value) VALUES (?,?)",
                              ("discussion_step:" + data["conversation_id"], step))
         return self.get(data["conversation_id"])
+
+    def _check_moved_create(self,conn,rid):
+        from core.workspace.conversation_moves import moved_target, ConversationMoved
+        moved=moved_target(conn,self.project_id,create_id=rid)
+        if moved and not conn.execute('SELECT 1 FROM sra_conversations WHERE conversation_id=?',(moved['conversation_id'],)).fetchone():
+            raise ConversationMoved(moved['target_project_id'],moved['conversation_id'])
 
     def patch(self, cid, request: ConversationPatch):
         self.get(cid)
@@ -512,11 +564,16 @@ class ConversationService:
     def _recent(self, cid):
         with self._connection() as conn:
             if self._has_tables(conn):
+                has_requests=conn.execute("SELECT 1 FROM sqlite_master WHERE name='sra_chat_requests'").fetchone()
+                revision='r.based_on_revision' if has_requests else 'NULL'
+                join=' LEFT JOIN sra_chat_requests r ON r.conversation_id=m.conversation_id AND r.request_id=m.request_id AND r.project_id=m.project_id' if has_requests else ''
                 rows = conn.execute(
-                    "SELECT data FROM sra_chat_messages WHERE conversation_id=? AND project_id=? ORDER BY seq DESC LIMIT 8",
+                    f"SELECT m.data,{revision} AS context_revision FROM sra_chat_messages m{join} WHERE m.conversation_id=? AND m.project_id=? ORDER BY m.seq DESC LIMIT 8",
                     (cid, self.project_id),
                 ).fetchall()
-                return [json.loads(r["data"]) for r in reversed(rows)]
+                from core.workspace.conversation_moves import history
+                moves=history(conn,cid);origins=moves[-1]['message_origins'] if moves else {}
+                return [{**json.loads(r['data']),'context_revision':r['context_revision'],**({'historical_project_context':True,'history_project_id':origins[json.loads(r['data'])['message_id']]} if json.loads(r['data'])['message_id'] in origins else {})} for r in reversed(rows)]
             return (
                 [m.model_dump(mode="json") for m in self._workspace(conn).messages[-8:]]
                 if cid == self.legacy_id
@@ -629,11 +686,22 @@ class ConversationService:
             if row is None:
                 raise ConversationNotFound("消息请求不存在或不属于当前对话")
             result = self._effective(row)
+            failure = None
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sra_chat_failures'").fetchone():
+                failure = conn.execute(
+                    "SELECT reason,retry_at FROM sra_chat_failures WHERE conversation_id=? AND request_id=?",
+                    (cid, rid),
+                ).fetchone()
+            recovery_id = self._recovery_id(cid, rid)
+            recovery_row = self._request(conn, cid, recovery_id)
+            payload = json.loads(row["payload"])
             result = {
                 k: v
                 for k, v in result.items()
                 if k not in ("payload", "payload_hash", "owner_token", "owner_process")
             }
+            result["recovery_of"] = payload.get("recovery_of")
+            result["recovery_request_id"] = recovery_id if recovery_row else None
             result["messages"] = [
                 {
                     **json.loads(r["data"]),
@@ -651,12 +719,47 @@ class ConversationService:
             row["material_fingerprint"] != self.material_state()["fingerprint"]
         )
         result["messages"] = self._guidance_view(cid, result["messages"])
-        from core.invocation_audit import read_audit
+        from core.invocation_audit import read_audit, budget_state
         result["call_audit"] = read_audit(self.db_path,self.project_id,operation_id="chat:"+cid+":"+rid)
+        budget = budget_state(self.db_path, "chat:"+cid+":"+rid)
+        used, remaining = budget["used"], budget["remaining"]
+        reason = failure["reason"] if failure else ("interrupted" if result["status"] == "interrupted" else "unknown")
+        cooldown = max(0, round(failure["retry_at"] - time.time(), 1)) if failure and failure["retry_at"] else 0
+        failure_view = {
+            "reason": reason,
+            "can_retry": result["status"] in ("failed", "interrupted") and remaining > 0 and cooldown == 0
+                and reason in ("connection_error", "timeout", "interrupted", "generation_failed", "unknown", "rate_limited"),
+            "retry_after_seconds": cooldown or None,
+            "model_attempts_used": used,
+            "model_attempts_limit": budget["limit"],
+            "model_attempts_remaining": remaining,
+            "can_restart": result["status"] == "failed" and reason == "budget_exhausted"
+                and not payload.get("recovery_of") and not recovery_row
+                and budget["parent_remaining"] != 0 and not result["basis_changed"],
+        }
+        result["failure"] = failure_view if result["status"] in ("failed", "interrupted") else None
+        from core.workspace.conversation_moves import history
+        with self._connection() as conn:moves=history(conn,cid)
+        origin=(moves[-1]['request_origins'].get(rid) if moves else None)
+        if origin:
+            result['history_project_id']=origin
+            if result['failure']:
+                result['failure'].update(can_retry=False,can_restart=False,recovery_blocked_reason='moved_history',notice='这条历史请求发生在移动前，保留原记录和额度；不能在新项目直接重试。请核对目标资料后发送新的讨论。')
         return result
+
+    def _recovery_id(self, cid, rid):
+        return "recovery-" + uuid5(NAMESPACE_URL, f"sra:recovery:{self.project_id}:{cid}:{rid}").hex
 
     def _guidance_view(self, cid, messages):
         """Live eligibility is a read-only projection, never a history rewrite."""
+        from core.workspace.conversation_moves import history
+        with self._connection() as conn:moves=history(conn,cid)
+        historical_messages=moves[-1]['message_origins'] if moves else {}
+        for m in messages:
+            origin=historical_messages.get(m.get('message_id'))
+            if origin:
+                name=next((h['source_name'] for h in moves if h['source_project_id']==origin),origin)
+                m.update(historical_project_context=True,history_project_id=origin,history_project_name=name)
         if not any(m.get("actions") for m in messages):
             return messages
         basis = self.material_state()
@@ -693,6 +796,8 @@ class ConversationService:
                     and not set(action.get("paper_ids", [])) <= papers
                 ):
                     reason = "引用资料已变化，请刷新材料"
+                if m.get('message_id') in historical_messages:
+                    reason='历史操作来自移动前的项目；请基于目标项目资料重新明确发起。'
                 projected.append(
                     {**action, "enabled": not bool(reason), "disabled_reason": reason}
                 )
@@ -824,6 +929,7 @@ class ConversationService:
         *,
         legacy=False,
         retry=False,
+        recovery=False,
         search_available=False,
     ):
         from core.workspace.teaching import teaching_identity, TeachingService
@@ -845,6 +951,10 @@ class ConversationService:
         body = request.model_dump(exclude={"request_id", "expected_revision", "wait_for_completion"})
         if body.get("plan_request") is None:
             body.pop("plan_request", None)  # Preserve pre-step-6 request hashes.
+        if body.get("recovery_of") is None:
+            body.pop("recovery_of", None)  # Preserve pre-recovery request hashes.
+        elif not (recovery or retry):
+            raise WorkspaceError("恢复关联只能通过明确的新一轮入口建立")
         signature = fingerprint(body)
         with self._connection() as conn:
             prior = self._request(conn, cid, request.request_id)
@@ -856,8 +966,14 @@ class ConversationService:
                 "interrupted",
             ):
                 return self.request_view(cid, request.request_id)
+            if not self.request_view(cid, request.request_id)["failure"]["can_retry"]:
+                return self.request_view(cid, request.request_id)
         elif retry:
             raise ConversationNotFound("要重试的原请求不存在")
+        if request.recovery_of and recovery and not prior:
+            parent = self.request_view(cid, request.recovery_of)
+            if not parent["failure"]["can_restart"]:
+                raise RevisionConflict("原请求不允许开启新一轮；请核对上层预算与原请求状态")
         from core.workspace.research_coach import STEP_AREAS
         area = request.area or STEP_AREAS.get(meta.get("discussion_step")) or STAGE_AREAS[meta["entry_stage"]]
         if area == "writing":
@@ -870,15 +986,22 @@ class ConversationService:
             and request.expected_revision != basis["revision"]
         ):
             raise RevisionConflict("项目记录已有更新，请刷新后重新发送；输入尚未保存")
+        recent_messages=self._recent(cid)
         history = [
             {
                 "role": m["role"],
                 "content": m["content"][:1800],
                 "area": m["area"],
                 "suggested_replies": m.get("suggested_replies", []),
+                "background_outdated": bool(basis['workspace'].brief_revision and (m.get('context_revision') is None or m['context_revision'] < basis['workspace'].brief_revision)),
+                **({"report_reference_map": {
+                    "task_id":m["research_task_id"], "version":m.get("report_version"),
+                    "citations":[{k:p.get(k) for k in ("number","paper_id","title","reading_scope")} for p in m.get("report_citations",[])],
+                    "notice":"仅解释这条历史消息的编号；不替代当前项目可用材料或其引用校验。",
+                }} if m.get("research_task_id") else {}),
             }
-            for m in self._recent(cid)
-            if m.get("request_id") != request.request_id
+            for m in recent_messages
+            if not m.get('historical_project_context') and m.get("request_id") not in (request.request_id, request.recovery_of)
         ]
         context = build_guide_context(
             self.shared,
@@ -900,6 +1023,9 @@ class ConversationService:
             )
         }
         context["conversation"]["discussion_step"] = meta.get("discussion_step")
+        if meta.get('movement_history'):
+            context['conversation']['movement_history']=meta['movement_history']
+            context['conversation']['prior_project_history']=[{'role':m['role'],'content':m['content'][:1800],'origin_project_id':m['history_project_id'],'notice':'仅供历史参考，不是目标项目已确认的条件、问题或方案。'} for m in recent_messages if m.get('historical_project_context')]
         context["conversation"][
             "case_available"
         ] = False  # Contract only; no case content in step 2.
@@ -988,6 +1114,8 @@ class ConversationService:
                         raise RevisionConflict(
                             "本对话已有消息正在处理，请等待完成后再发送"
                         )
+                    from core.resource_limits import RESOURCES
+                    ownership.enter_context(RESOURCES.acquire())
                     if latest_meta["chat_revision"] != meta["chat_revision"]:
                         raise RevisionConflict(
                             "对话已有新消息或设置变化，请读取最新对话后再发送"
@@ -1014,6 +1142,14 @@ class ConversationService:
                             ),
                         )
                     else:
+                        if request.recovery_of:
+                            if request.request_id != self._recovery_id(cid, request.recovery_of):
+                                raise RevisionConflict("恢复请求身份不一致")
+                            parent_row = self._request(conn, cid, request.recovery_of)
+                            if not parent_row or parent_row["status"] != "failed":
+                                raise RevisionConflict("原请求状态已改变，未开启新一轮")
+                            if parent_row["material_fingerprint"] != current["fingerprint"]:
+                                raise RevisionConflict("原请求依据已变化，请先复核材料，不沿旧请求重开")
                         stamp = now()
                         conn.execute(
                             "INSERT INTO sra_chat_requests VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1035,17 +1171,18 @@ class ConversationService:
                                 basis["revision"],
                             ),
                         )
-                        self._insert_message(
-                            conn,
-                            cid,
-                            Message(
-                                role="user",
-                                content=request.content,
-                                area=area,
-                                mode="user",
-                            ).model_dump(mode="json"),
-                            request.request_id,
-                        )
+                        if not request.recovery_of:
+                            self._insert_message(
+                                conn,
+                                cid,
+                                Message(
+                                    role="user",
+                                    content=request.content,
+                                    area=area,
+                                    mode="user",
+                                ).model_dump(mode="json"),
+                                request.request_id,
+                            )
                     self._touch(conn, cid)
             if not duplicate:
                 elapsed = time.monotonic()-context_started
@@ -1054,23 +1191,35 @@ class ConversationService:
                     # Transfer the EXISTING OS lease, never leave a queued gap.
                     # No new queue, database or generation state machine.
                     lease = ownership.pop_all()
+                    worker_entered = threading.Event()
                     def work():
+                        worker_entered.set()
                         try:
                             self._complete_attempt(*args)
                         finally:
                             lease.close()
-                    execution_context = copy_context()
+                    worker = None
                     try:
-                        threading.Thread(target=execution_context.run,args=(work,),daemon=True).start()
+                        execution_context = copy_context()
+                        worker = threading.Thread(target=execution_context.run,args=(work,),daemon=True)
+                        worker.start()
                     except Exception:
-                        self._fail(cid,request.request_id,token,"后台生成未能启动，原消息保留，请明确重试",503,"WorkerStartError")
-                        lease.close()
+                        if worker_entered.is_set() or (worker is not None and getattr(worker,"ident",None) is not None):
+                            # A missing start acknowledgement is not proof that
+                            # the worker stopped. Its finally owns this lease.
+                            raise ConversationStorageError("后台启动响应未确认，原请求可能仍在处理；请查询原请求状态，不要重新发起") from None
+                        try:
+                            self._fail(cid,request.request_id,token,"后台生成未能启动，原消息保留，请明确重试",503,"WorkerStartError")
+                        except Exception as storage_error:
+                            raise ConversationStorageError("后台工作未启动，失败状态未能保存；请保留原请求编号，待存储恢复后查询并明确重试") from storage_error
+                        finally:
+                            lease.close()
                 else:
                     self._complete_attempt(*args)
         return self.request_view(cid, request.request_id)
 
     def _complete_attempt(self,cid,request,topic,generate,token,basis,area,context,context_elapsed):
-        from core.invocation_audit import AuditScope
+        from core.invocation_audit import AuditScope, inherited_policy
         from core.workspace.plans import prepare_plan, rule_plan, ConditionEvidenceError
         from core.workspace.guidance_policy import prepare
         scope = AuditScope(self.db_path,self.project_id,"chat:"+cid+":"+request.request_id,
@@ -1078,6 +1227,14 @@ class ConversationService:
         phase_kind = "plan" if context.get("plan_generation",{}).get("allowed") else "guidance"
         rejected_actions=[]
         try:
+            if request.recovery_of:
+                policy = inherited_policy(self.db_path, "chat:"+cid+":"+request.recovery_of)
+                if policy:
+                    if policy.get("unavailable"):
+                        raise WorkspaceError("原请求的上层调用限制无法核实，未开启模型调用")
+                    scope.group_id = policy["group_id"]
+                    for key in ("limits", "pricing", "cost_limit", "stop_on_model_failure", "expected_model"):
+                        setattr(scope, key, policy[key])
             with scope.activate():
                 ticket = scope.begin("phase",phase_kind,"context",elapsed_before_start=context_elapsed)
                 scope.finish(ticket)
@@ -1126,7 +1283,20 @@ class ConversationService:
             from core.llm.base import LLMTruncatedError
             if isinstance(exc,LLMTruncatedError):
                 reason = "模型回复未完整返回，可能是推理或正文占满了输出额度。本次没有保存不完整草案；原消息和已有材料仍保留。可缩小本次问题后重新发送，或查看调用详情再明确重试。"
-            self._fail(cid,request.request_id,token,reason,code,type(exc).__name__)
+            classified, retry_after = failure_reason(exc)
+            if classified == "budget_exhausted":
+                reason = "本次请求的模型网络调用额度已用完。原请求不能继续重试；如无上层预算限制，可明确开启一次新的处理轮次（会再次调用模型并可能产生费用）。原消息和已有材料仍保留。"
+            elif classified == "authentication":
+                reason = "模型认证失败。请核对服务凭据或权限后再发起请求；当前请求不会自动重试。"
+            elif classified == "rate_limited":
+                reason = "模型限流，当前不能直接重试。请等待冷却结束后核对原请求；原消息已保留。"
+            elif classified == "cost_exhausted":
+                reason = "本次体验的共享费用额度不足以预留下一次调用，已停止发送；可能尚未花满授权金额。原消息和已有材料仍保留，切换项目或重试不会补充额度。"
+            elif classified == "experience_expired":
+                reason = "本次真实模型体验授权已到期，未发出新调用。原消息和已有材料仍保留，请联系本地操作者重新确认体验安排。"
+            elif classified == "experience_limit":
+                reason = "本次体验已达到累计调用次数的保护上限，未发出新调用。原消息和已有材料仍保留，重试或开始新一轮不会补充本次体验额度。"
+            self._fail(cid,request.request_id,token,reason,code,type(exc).__name__,classified,retry_after)
 
     def _touch(self, conn, cid):
         conn.execute(
@@ -1219,13 +1389,19 @@ class ConversationService:
             )
             self._touch(conn, cid)
 
-    def _fail(self, cid, rid, token, message, code, error_type):
+    def _fail(self, cid, rid, token, message, code, error_type, reason=None, retry_after=None):
         with self._connection(True) as conn:
+            conn.execute(DDL[-1])
             changed = conn.execute(
                 "UPDATE sra_chat_requests SET status='failed',error=?,error_code=?,updated_at=? WHERE conversation_id=? AND request_id=? AND owner_token=? AND status='processing'",
                 (message, code, now(), cid, rid, token),
             ).rowcount
             if changed:
+                conn.execute(
+                    "INSERT OR REPLACE INTO sra_chat_failures VALUES (?,?,?,?)",
+                    (cid, rid, reason or error_type or "generation_failed",
+                     time.time() + retry_after if retry_after else None),
+                )
                 self._touch(conn, cid)
 
     def retry(self, cid, rid, topic, generate, expected_revision=None, wait_for_completion=True, *, search_available=False):
@@ -1241,6 +1417,32 @@ class ConversationService:
             **json.loads(prior["payload"]),
         )
         return self.send(cid, request, topic, generate, retry=True, search_available=search_available)
+
+    def restart(self, cid, rid, topic, generate, *, acknowledge_model_cost,
+                wait_for_completion=True, search_available=False):
+        if acknowledge_model_cost is not True:
+            raise WorkspaceError("须先确认新一轮会再次调用模型且可能产生费用")
+        self.get(cid)
+        new_id = self._recovery_id(cid, rid)
+        with self._connection() as conn:
+            existing = self._request(conn, cid, new_id)
+            parent = self._request(conn, cid, rid)
+        if existing:
+            return self.request_view(cid, new_id)
+        if not parent:
+            raise ConversationNotFound("原消息请求不存在或不属于当前对话")
+        if not self.request_view(cid, rid)["failure"]["can_restart"]:
+            raise RevisionConflict("原请求不能开启新一轮；请核对请求原因及上层总预算")
+        payload = json.loads(parent["payload"])
+        payload["recovery_of"] = rid
+        request = ConversationSend(
+            request_id=new_id,
+            expected_revision=parent["based_on_revision"],
+            wait_for_completion=wait_for_completion,
+            **payload,
+        )
+        return self.send(cid, request, topic, generate, recovery=True,
+                         search_available=search_available)
 
     def apply(self, cid, sid, expected_revision=None, *, _transaction=None):
         # Validate ownership/boundary before any migration or mutation.

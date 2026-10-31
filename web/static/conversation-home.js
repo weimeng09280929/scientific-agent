@@ -4,10 +4,11 @@
 (() => {
     "use strict";
     const BASE=window.SRA_API_BASE || "", $=id=>document.getElementById(id);
-    const g={app:null,v:null,projects:[],projectsLoaded:false,cap:null,capPromise:null,listTicket:0,sideTicket:0,recentTicket:0,recent:[],recentLoaded:false,recentNext:null,projectNext:null,projectExpanded:false,files:new Map()};
+    const g={app:null,v:null,projects:[],projectsLoaded:false,cap:null,capPromise:null,listTicket:0,sideTicket:0,recentTicket:0,recent:[],recentLoaded:false,recentNext:null,projectNext:null,projectExpanded:false,files:new Map(),folders:new Map(),expandedFolders:new Set()};
     const uid=()=>crypto.randomUUID();
     const E=(tag,cls,text)=>{const n=document.createElement(tag);if(cls)n.className=cls;if(text!=null)n.textContent=text;return n;};
     const button=(text,fn,cls="btn btn-secondary")=>{const b=E("button",cls,text);b.type="button";b.onclick=fn;return b;};
+    function iconButton(text,fn,cls,kind){const b=button('',fn,cls),icon=E('span','sra-nav-icon sra-nav-'+kind);icon.setAttribute('aria-hidden','true');b.append(icon,E('span','ch-nav-name',text));return b;}
     const store={get(key,fallback=null){try{return JSON.parse(localStorage.getItem(key)) ?? fallback;}catch(_){return fallback;}},set(key,value){try{localStorage.setItem(key,JSON.stringify(value));}catch(_){}},remove(key){try{localStorage.removeItem(key);}catch(_){}}};
     const scope=(pid,cid)=>`${pid || "new"}/${cid || "draft"}`;
     const draftKey=v=>"sra.ch.draft."+scope(v.pid,v.cid), pendingKey=v=>"sra.ch.pending."+scope(v.pid,v.cid);
@@ -21,7 +22,7 @@
         try {
             const r=await fetch(BASE+url,{method,signal:controller.signal,headers:body===undefined ? {} : {"Content-Type":"application/json"},body:body===undefined ? undefined : JSON.stringify(body)});
             const data=await r.json().catch(()=>({}));
-            if(!r.ok)throw Object.assign(new Error(typeof data.detail==="string" ? data.detail : `请求失败（${r.status}）`),{status:r.status,data});
+            if(!r.ok)throw Object.assign(new Error(typeof data.detail==="string" ? data.detail : data.detail?.message || `请求失败（${r.status}）`),{status:r.status,data});
             return data;
         } finally {clearTimeout(timer);signal?.removeEventListener("abort",stop);}
     }
@@ -48,9 +49,17 @@
         })().finally(()=>{g.capPromise=null;});
         return g.capPromise;
     }
-    function fail(v,e){if(!current(v))return;v.error=textError(e);v.r.error.hidden=false;v.r.error.textContent=v.error;}
+    function fail(v,e){if(!current(v))return;v.error=textError(e);v.r.error.hidden=false;v.r.error.textContent=v.error;
+        const moved=e.data?.detail;if(moved?.code==='conversation_moved'){
+            v.writable=false;v.remoteBusy=false;clearTimeout(v.timer);clearTimeout(v.taskTimer);
+            v.r.error.append(E('p','','未发送内容仍保留在旧归属，不会自动带入或发送到新项目。'),button('打开新的所属项目',()=>{
+                if(hasUnsent(v.pid,v.cid)&&!confirm('旧归属中的文字、请求编号和文件选择仍保留，不会自动带到新项目。可以先复制文字、处理附件；是否仅打开新的归属？'))return;
+                g.app.navigate({projectId:moved.project_id,conversationId:moved.conversation_id,page:'dashboard'});
+            }),button('复制保留的文字',async()=>{const text=v.r.input.value||v.pending?.body?.content||'';try{await navigator.clipboard.writeText(text);}catch(_){v.r.input.focus();v.r.input.select();}},'ch-text-button'));
+        }
+    }
     function notice(v,text){if(!current(v))return;v.r.error.hidden=!text;v.r.error.textContent=text;}
-    function saveDraft(v){store.set(draftKey(v),{text:v.r.input.value,settings:readSettings(v),domain:v.r.domain.value,domainConfirmed:v.domainConfirmed===true,selectedItemId:v.selectedItemId || null,planRequest:v.planRequest || null,planMethod:v.r.planMethod?.value || ""});}
+    function saveDraft(v){store.set(draftKey(v),{text:v.r.input.value,settings:readSettings(v),domain:v.r.domain.value,domainConfirmed:v.domainConfirmed===true,selectedItemId:v.selectedItemId || null,paperIds:v.paperIds.slice(),planRequest:v.planRequest || null,planMethod:v.r.planMethod?.value || ""});}
     function compactName(text,fallback){
         const topic=text.match(/(?:联邦学习|大模型|机器学习|固态电解质|硫化物|量子|机器人|图神经网络)[^，,。！？\n；;]{0,12}/)?.[0];
         const cleaned=(topic || text.replace(/^.*?(?:感兴趣的方向是|研究主题是|研究方向是)[：:]?/,'')) .replace(/\s+/g," ").replace(/^(这是我第一次做研究[，,]?|我目前的研究问题是[：:]?|我想(?:研究|了解|做)|请(?:你|帮我)?(?:检索|搜索|分析|讨论|研究)?|帮我(?:检索|查找|分析))\s*/g,"").split(/[。！？\n]/)[0].split(/[，,；;]|(?:并且|并整理|并分析|想请你|请帮我)/)[0].trim();
@@ -60,7 +69,8 @@
     function discussionName(text,stage){text=text.replace(/(?:不|不要)(?:直接|自动)?生成方案/g,'');return /方案|可行/.test(text)?'方案设计与审阅':/问题|选题/.test(text)?'细化研究问题':/文献|论文|现状/.test(text)?'梳理文献与现状':({orientation:'明确兴趣与条件',literature:'了解研究现状',question:'讨论研究问题',design:'方案设计与审阅'})[stage] || '研究讨论';}
     function navigationContext(){
         const route=g.app.getRoute(),name=projectName(route.projectId),label=$("ch-current-project");
-        label.textContent=route.projectId ? name : "首次发送后建立项目";label.title=route.projectId ? name : "尚未选择项目，不会自动创建";label.disabled=!route.projectId;
+        label.replaceChildren();if(route.projectId){const icon=E('span','sra-nav-icon sra-nav-folder');icon.setAttribute('aria-hidden','true');label.append(icon);}label.append(E('span','ch-nav-name',route.projectId ? name : "首次发送后建立项目"));label.title=route.projectId ? name : "尚未选择项目，不会自动创建";label.disabled=!route.projectId;
+        if(route.projectId&&route.page==='project-overview')label.setAttribute('aria-current','page');else label.removeAttribute('aria-current');
         $('ch-project-new').disabled=!route.projectId;
         $('ch-project-new').hidden=!route.projectId;
         $('ch-project-new').textContent='在本项目新建对话';
@@ -73,7 +83,120 @@
         document.querySelectorAll(popupSelector).forEach(n=>{if(n.open && n!==except){const hadFocus=n.contains(document.activeElement);n.open=false;if(focus&&hadFocus)n.querySelector('summary')?.focus({preventScroll:true});}});
         const v=g.v;if(v && !v.r.downloadPanel.hidden && except!==v.r.downloadPanel){v.r.downloadPanel.hidden=true;v.r.downloadToggle.setAttribute('aria-expanded','false');if(focus)v.r.downloadToggle.focus({preventScroll:true});}
     }
-    function rowMenu(label,fn,details=''){const d=E('details','ch-row-menu'),s=E('summary','','⋯'),popup=E('div','ch-row-popup');s.setAttribute('aria-label',label);popup.append(E('small','',label.replace(/^(项目|对话)操作：/,'')));if(details)popup.append(E('small','',details));popup.append(button('重命名',()=>{d.open=false;s.focus({preventScroll:true});fn();},'ch-side-rename'));d.append(s,popup);return d;}
+    function rowMenu(label,fn,details='',move=null){const d=E('details','ch-row-menu'),s=E('summary','','⋯'),popup=E('div','ch-row-popup');s.setAttribute('aria-label',label);popup.append(E('small','',label.replace(/^(项目|对话)操作：/,'')));if(details)popup.append(E('small','',details));popup.append(button('重命名',()=>{d.open=false;s.focus({preventScroll:true});fn();},'ch-side-rename'));if(move&&g.cap?.conversation_moves)popup.append(button('移动到项目',()=>{d.open=false;move();},'ch-side-rename'));d.append(s,popup);return d;}
+    function hasUnsent(pid,cid){const key=scope(pid,cid),draft=store.get('sra.ch.draft.'+key,{}),v=g.v;
+        return !!(draft.text?.trim()||draft.planRequest||draft.selectedItemId||draft.paperIds?.length||store.get('sra.ch.file.'+key)||g.files.has(key)||store.get('sra.ch.pending.'+key)||store.get('sra.ch.task-pending.'+key)||(v?.pid===pid&&v.cid===cid&&v.r.input.value.trim()));
+    }
+    async function openMove(pid,cid,title){
+        g.closeMove?.();closePopups();
+        const dialog=E('dialog','case-dialog ch-move-dialog'),body=E('div'),status=E('p','ch-warning'),select=E('select');
+        select.setAttribute('aria-label','移动目标项目');select.add(new Option('请选择目标项目',''));
+        const key='sra.ch.move.'+scope(pid,cid),prefix=`/api/projects/${encodeURIComponent(pid)}/conversations/${encodeURIComponent(cid)}`;
+        let pending=store.get(key),passed=null,cursor=0,checking=false,submitting=false,closed=false,serial=0,read=null;
+        const wire=p=>({request_id:p.request_id,target_project_id:p.target_project_id,expected_token:p.expected_token,acknowledge_history:true});
+        const same=(a,b)=>!!a&&!!b&&a.request_id===b.request_id&&a.target_project_id===b.target_project_id&&a.expected_token===b.expected_token;
+        const refused=(r,p)=>r?.move_state==='not_executed'&&same(r,p)&&r.conversation_id===cid;
+        if(pending)pending={...pending,client_state:refused(pending.result,pending)?'not_executed':pending.client_state==='completed'?'completed':'unknown'};
+        const live=()=>!closed&&dialog.isConnected&&g.closeMove===close;
+        function close(){closed=true;serial++;read?.abort();dialog.close();dialog.remove();if(g.closeMove===close)g.closeMove=null;}
+        g.closeMove=close;
+        function invalidate(){serial++;read?.abort();read=null;checking=false;passed=null;}
+        function render(){
+            select.disabled=!!pending;
+            submit.disabled=submitting||checking||!passed||passed.serial!==serial||passed.target!==select.value||!passed.token||!!pending&&pending.client_state!=='not_executed';
+            check.disabled=submitting||checking||!pending&&!select.value;
+            check.textContent=pending&&pending.client_state!=='not_executed'?'核对原移动结果':'预检查所选项目';
+            reset.hidden=!pending||!refused(pending.result,pending)||pending.client_state!=='not_executed';reset.disabled=submitting||checking;
+            cancel.textContent=submitting?'关闭窗口':'取消';
+        }
+        function persist(next,op){
+            const latest=store.get(key);if(!same(latest,op))return false;
+            store.set(key,next);pending=next;return true;
+        }
+        function finish(result,op){
+            if(!live())return;
+            if(same(store.get(key),op))store.remove(key);
+            g.folders.delete(pid);g.folders.delete(result.project_id);window.dispatchEvent(new CustomEvent('sra:projects-changed'));
+            close();g.app.navigate({projectId:result.project_id,conversationId:cid,page:'dashboard'});
+        }
+        function accept(result,op){
+            if(result?.move_state==='completed'&&result.request_id===op.request_id&&result.conversation_id===cid){
+                const saved=persist({...op,client_state:'completed',result},op);if(saved)finish(result,op);return saved;
+            }
+            if(refused(result,op)){
+                const saved=persist({...op,client_state:'not_executed',result},op);
+                if(saved&&live()){invalidate();status.textContent=result.message+'；本次提交已明确拒绝且未执行。可以重新选择目标；保留同一目标时，请重新预检查。';render();}
+                return saved;
+            }
+            return false;
+        }
+        const cancel=button('取消',close),reset=button('重新选择目标',()=>{
+            const latest=store.get(key);
+            if(!same(latest,pending)||!refused(latest?.result,latest)||latest.client_state!=='not_executed'){
+                pending=latest||pending;status.textContent='原移动结果尚未确定，请先核对原请求，不能重新选择目标。';render();return;
+            }
+            // Only an exact, server-fenced refusal authorizes discarding this
+            // operation. A 404 or an arbitrary 409 is never this proof.
+            store.remove(key);pending=null;invalidate();select.value='';status.textContent='请选择目标项目，再重新预检查和明确确认。';render();select.focus();
+        });reset.hidden=true;
+        const submit=button('确认移动',async()=>{
+            if(submitting||checking||!passed||passed.serial!==serial||passed.target!==select.value||!passed.token||pending&&pending.client_state!=='not_executed')return;
+            if(hasUnsent(pid,cid)){status.textContent='存在未发送草稿、附件选择或未确认请求，请先回原对话处理；不会自动发送或转移这些内容。';return;}
+            const latest=store.get(key);
+            if(latest&&!same(latest,pending)){pending=latest;invalidate();status.textContent='另一窗口已有移动记录，请先核对原结果。';render();return;}
+            const op={request_id:pending?.request_id||'move-'+uid(),target_project_id:passed.target,expected_token:passed.token,acknowledge_history:true};
+            pending={...op,client_state:'unknown'};store.set(key,pending);submitting=true;passed=null;status.textContent='正在提交移动；关闭窗口不会撤销已经提交的操作。';render();
+            try{const result=await request(prefix+'/move',{method:'POST',body:wire(op)});if(!accept(result,op)&&live())status.textContent='移动结果尚未确认，请核对原移动结果。';}
+            catch(e){
+                if(accept(e.data?.detail,op))return;
+                if(live()){
+                    status.textContent=e.data?.detail?.code==='conversation_moved'?'对话归属已变化，这不等于本次未执行。请核对原请求和现有归属。':'移动结果尚未确认，请核对原移动结果；已保留原编号和目标，不会自动重发或重新选择。';
+                    const moved=e.data?.detail;
+                    if(moved?.code==='conversation_moved')status.append(button('查看现有归属',()=>{if(live()){close();g.app.navigate({projectId:moved.project_id,conversationId:moved.conversation_id,page:'dashboard'});}}));
+                }
+            }finally{submitting=false;if(live())render();}
+        });
+        const check=button('预检查所选项目',async()=>{
+            if(submitting||checking||!pending&&!select.value)return;
+            // Read current persistent state, including a response which arrived
+            // after an earlier dialog closed. Never mutate another window.
+            const latest=store.get(key);if(latest)pending={...latest,client_state:refused(latest.result,latest)?'not_executed':latest.client_state==='completed'?'completed':'unknown'};
+            const target=select.value,op=pending?wire(pending):null,ticket=++serial;
+            checking=true;passed=null;read=new AbortController();const controller=read;status.textContent=pending&&pending.client_state!=='not_executed'?'正在核对原移动结果…':'正在核对真实关联和执行状态…';render();
+            try{
+                if(pending&&pending.client_state!=='not_executed'){
+                    const result=await request(prefix+'/move-requests/'+encodeURIComponent(op.request_id),{signal:controller.signal});
+                    if(!live()||ticket!==serial)return;
+                    if(!accept(result,op))status.textContent='尚无与本次提交完全对应的最终回执；原提交仍可能执行，请保留编号和目标继续核对。';
+                    return;
+                }
+                const result=await request(prefix+'/move-precheck?target_project_id='+encodeURIComponent(target),{signal:controller.signal});
+                if(!live()||ticket!==serial||select.value!==target)return;
+                if(result.target_project_id!==target)throw new Error('预检查的目标不匹配，请重新选择并核对。');
+                passed=result.can_move?{target,token:result.token,serial:ticket}:null;
+                status.textContent=result.can_move?'预检查通过。请核对目标项目与历史来源说明，然后明确确认。':result.reasons.map(r=>r.message).join('；');
+            }catch(e){
+                if(!live()||ticket!==serial||e.name==='AbortError')return;
+                status.textContent=op&&pending?.client_state!=='not_executed'?'尚无可确认的最终回执；原提交仍可能执行，不能清除编号或重新选择目标。':e.message;
+            }finally{if(live()&&ticket===serial){checking=false;read=null;render();}}
+        });
+        const load=button('加载更多目标项目',async()=>{
+            try{const data=await request('/api/projects?limit=20&offset='+cursor);if(!live())return;
+                for(const p of data.projects)if(p.project_id!==pid){const label=(p.display_name||p.topic)+' · '+timeLabel(p.created_at)+' · '+p.project_id.slice(-8),option=[...select.options].find(o=>o.value===p.project_id);if(option)option.text=label;else select.add(new Option(label,p.project_id));}
+                cursor=data.next_offset;load.hidden=cursor===null;
+                if(select.options.length===1&&cursor===null&&!pending)status.textContent='没有其他已有项目可供选择；这里不会自动创建目标项目。';
+            }catch(e){if(live()){status.textContent='目标项目暂时无法读取：'+e.message;load.textContent='重试读取目标项目';}}
+        });
+        if(pending){select.add(new Option('上次移动目标 · '+pending.target_project_id.slice(-8),pending.target_project_id));select.value=pending.target_project_id;}
+        select.onchange=()=>{invalidate();status.textContent='目标已改变，请重新进行服务端预检查。';render();};
+        dialog.append(E('h2','','移动到项目'),E('p','',`对话：${title}；当前项目：${projectName(pid)}。仅支持无关联材料的普通文字对话。`),E('p','','历史消息会保留。移动后，新的讨论使用目标项目的资料；原项目已确认的研究条件和成果不会因此成为目标项目的正式记录。'),body,status);
+        if(hasUnsent(pid,cid)){body.append(E('p','','请先处理未发送文字、待上传文件、准备中的材料关联或未确认请求。原草稿保留，不会自动发送。'),button('返回原对话处理草稿',()=>{close();g.app.navigate({projectId:pid,conversationId:cid,page:'dashboard'});}),cancel);}
+        else{
+            body.append(E('label','','目标项目'),select,load,check,submit,reset,cancel);
+            status.textContent=pending?.client_state==='not_executed'?pending.result.message+'；本次提交已明确拒绝且未执行，可以重新选择目标或重新预检查。':pending?'保留了原移动请求编号和目标。请核对原移动结果；没有回执不等于未执行。':'请选择目标项目，预检查后再明确确认。';
+        }
+        dialog.addEventListener('cancel',e=>{e.preventDefault();close();});document.body.append(dialog);dialog.showModal();render();load.click();cancel.focus();
+    }
     function readSettings(v){return {guidance_mode:v.r.mode.value,entry_stage:v.r.stage.value,discussion_goal:v.r.goal.value,...(v.discussionStep ? {discussion_step:v.discussionStep} : {})};}
     function setSettings(v,s){v.r.mode.value=s.guidance_mode || "direct";v.r.stage.value=s.entry_stage || "orientation";v.r.goal.value=s.discussion_goal || "";v.discussionStep=s.discussion_step || null;}
 
@@ -87,11 +210,11 @@
         const details=E('details','ch-route-details');details.open=open;
         details.append(E('summary','',`科研流程 · ${selected?.label || '选择讨论步骤'}`));
         const choices=E('div','ch-route-choices');choices.setAttribute('aria-label','选择本次科研讨论步骤');
-        for(const s of route.steps){const b=button(s.label,()=>chooseResearchStep(v,s.id),'ch-text-button');b.dataset.researchStep=s.id;b.setAttribute('aria-pressed',String(s.id===route.discussion_step));b.disabled=v.busy||v.remoteBusy||v.routeBusy;choices.append(b);}
+        for(const s of route.steps){const b=button(s.label,()=>chooseResearchStep(v,s.id),'ch-text-button');b.dataset.researchStep=s.id;b.setAttribute('aria-pressed',String(s.id===route.discussion_step));b.disabled=v.busy||v.remoteBusy||v.routeBusy;b.append(E('small','ch-option-expectation',s.purpose));choices.append(b);}
         details.append(choices,E('p','muted small',route.notice));box.append(details);
-        if(selected){const row=E('div','ch-route-current');row.append(E('span','muted small',selected.blocked_reason || selected.purpose));
-            const action=button(selected.action_label,()=>beginResearchStep(v,selected),'btn btn-secondary');action.dataset.ref='beginResearchStep';action.disabled=!!selected.blocked_reason||v.busy||v.remoteBusy||v.routeBusy;row.append(action);box.append(row);
-            if(route.next_step){const next=button('讨论好了，'+(route.next_step.label.startsWith('开始')?'':'进入')+route.next_step.label,()=>chooseResearchStep(v,route.next_step.id),'ch-text-button ch-route-next');next.title=route.next_step.blocked_reason || '只切换讨论环节，不自动执行任务或确认材料';next.disabled=!!route.next_step.blocked_reason||v.busy||v.remoteBusy||v.routeBusy;box.append(next);}}
+        if(selected){const row=E('div','ch-route-current');row.append(E('span','muted small',[selected.purpose,selected.expectation,selected.blocked_reason].filter(Boolean).join(' ')));
+            const action=button(selected.action_label,()=>beginResearchStep(v,selected),'btn btn-secondary');action.dataset.ref='beginResearchStep';action.disabled=!!selected.blocked_reason||v.busy||v.remoteBusy||v.routeBusy;const behavior={search:'点击后核对检索范围并明确确认，才发起检索；可能产生调用费用。',plan:'点击仅打开方案请求设置；核对并发送后才生成草案，采纳另需确认。',discuss:'点击发送对应讨论消息；预计获得当前环节的解释或讨论稿。'};action.append(E('small','ch-option-expectation',behavior[selected.action]||'请核对当前操作。'));row.append(action);box.append(row);
+            if(route.next_step){const next=button('讨论好了，'+(route.next_step.label.startsWith('开始')?'':'进入')+route.next_step.label,()=>chooseResearchStep(v,route.next_step.id),'ch-text-button ch-route-next');next.title=route.next_step.blocked_reason || '只切换讨论环节，不自动执行任务或确认材料';next.disabled=!!route.next_step.blocked_reason||v.busy||v.remoteBusy||v.routeBusy;next.append(E('small','ch-option-expectation','只切换讨论环节，不自动发送、检索或确认材料。'));box.append(next);}}
     }
     async function chooseResearchStep(v,id){
         if(!current(v)||v.busy||v.remoteBusy||v.routeBusy)return;
@@ -126,9 +249,11 @@
         v.r.progress.textContent=flow?.product_boundary?.restricted ? '历史材料 · 仅查看与讨论' : (v.meta?.discussion_goal || flow?.flow?.next?.text || '本次讨论：'+discussion);
         v.r.progress.title='查看研究概况、阶段与待确认事项';
         v.r.renameProject.hidden=!v.pid;v.r.rename.hidden=!v.cid;
+        if(v.r.move)v.r.move.hidden=!v.cid||!g.cap?.conversation_moves||!!v.material?.teaching;
+        if(v.r.moveHistory){v.r.moveHistory.hidden=!v.meta?.movement_history?.length;v.r.moveHistory.textContent=v.meta?.movement_history?.map(m=>'此对话于 '+timeLabel(m.created_at)+' 从「'+m.source_name+'」移动到「'+m.target_name+'」。历史消息保留原语境，新的讨论使用当前项目资料。').join('\n')||'';}
         v.r.identity.hidden=!v.pid;
         v.r.panelToggle.hidden=!v.pid;v.r.downloadToggle.hidden=!v.pid;
-        v.r.project.onclick=()=>{if(v.pid)g.app.navigate({projectId:v.pid,conversationId:null,page:'dashboard'});};
+        v.r.project.onclick=()=>{if(v.pid)g.app.navigate({projectId:v.pid,page:'project-overview'});};
         v.r.fullName.textContent='项目：'+projectName(v.pid)+'；对话：'+v.r.title.textContent;
         v.r.downloadToggle.disabled=!v.pid;
         v.r.downloadToggle.classList.toggle('ch-muted-download',!v.material?.workspace?.items?.length && !v.material?.workflow?.materials?.length);
@@ -141,11 +266,14 @@
         const stages=['明确条件','了解研究现状','确认研究问题','形成并审阅方案'],currentStage=({orientation:0,literature:1,question:2,design:3})[flow?.product_stage] ?? 0;
         [...v.r.stageList.children].forEach((n,i)=>{n.textContent=stages[i];if(i===currentStage)n.setAttribute('aria-current','step');else n.removeAttribute('aria-current');});
         v.r.summaryHint.textContent=branch?.next?.text || contextHint;v.r.confirmedQuestion.textContent='当前还没有正式问题，可在对话中讨论后明确采纳。';v.r.confirmedQuestion.hidden=!!branch?.question;
-        v.r.confirmedBrief.textContent=Object.entries(v.material?.workspace?.brief || {}).filter(([k,val])=>typeof val==='string'&&val.trim()).map(([k,val])=>(({goal:'目标',resources:'资源',time_budget:'时间',constraints:'约束'})[k] || k)+ '：'+val).join('；') || '尚无已保存的研究条件';
+        v.r.confirmedBrief.textContent=Object.entries(v.material?.workspace?.brief || {}).filter(([k,val])=>typeof val==='string'&&val.trim()).map(([k,val])=>(({goal:'研究目标',background:'已有基础',resources:'资源条件',time_budget:'时间安排',constraints:'约束'})[k] || k)+ '：'+val).join('；') || '尚无已保存的研究条件';
         v.r.confirmedBrief.hidden=!Object.values(v.material?.workspace?.brief || {}).some(val=>typeof val==='string'&&val.trim());
+        if(v.r.backgroundScope)v.r.backgroundScope.hidden=!v.pid;
         v.r.researchSummary.hidden=!v.pid || !!v.materialTab&&v.materialTab!=='overview';v.r.composeScope.textContent=v.pid ? '归属：'+projectName(v.pid) : '独立新研究';v.r.composeScope.title=v.r.composeScope.textContent;
         navigationContext();
-        v.r.belongsLabel.textContent=v.cid ? "切换研究项目（草稿独立保存）" : "首次发送后归入";
+        v.r.belongsLabel.textContent=v.cid ? "当前对话所属项目" : "新对话所属项目（发送前选择）";
+        v.r.belongs.disabled=!!v.cid||v.busy||v.startPending||!!v.pending;
+        v.r.belongsNote.textContent=v.cid ? (g.cap?.conversation_moves?'整理放错项目的普通文字对话，可使用对话操作中的“移动到项目”；关联材料的对话须先通过预检查。':'这段对话属于当前项目；可从项目文件夹开启另一段讨论。') : '选择后打开该项目的新对话草稿；当前输入和附件独立保留，返回可继续。明确发送后才保存新会话。';
         const chosen=v.pid || "";
         v.r.belongs.replaceChildren(new Option("＋ 开始新研究",""));
         for(const p of g.projects)v.r.belongs.add(new Option(p.display_name || p.topic || p.project_id,p.project_id));
@@ -187,22 +315,75 @@
     function paintProjects(){
         const target=$("ch-projects");if(!target)return;
         if(!g.projectsLoaded){target.replaceChildren(E("p","ch-side-caption","正在读取项目…"));return;}
+        const focusedToggle=document.activeElement?.matches('.ch-folder-toggle')?document.activeElement.closest('.ch-folder')?.dataset.projectId:null;
         const q=$("ch-project-search").value.trim(), pid=g.app.getRoute().projectId;
         target.replaceChildren();
         let rows=g.projects.slice(0,g.projectExpanded ? g.projects.length : 5);
         if(!q && g.currentProject?.project_id===pid && !rows.some(p=>p.project_id===pid))rows=[...(g.projectExpanded?rows:rows.slice(0,4)),g.currentProject];
         for(const p of rows){
-            const b=button(p.display_name || p.topic || p.project_id,()=>g.app.navigate({projectId:p.project_id,conversationId:null,page:"dashboard"}),"ch-project-link");
+            const name=p.display_name || p.topic || p.project_id;
+            const b=iconButton(name,()=>g.app.navigate({projectId:p.project_id,conversationId:g.app.getRoute().projectId===p.project_id?g.app.getRoute().conversationId:null,page:"project-overview"}),"ch-project-link",'folder');
+            b.id='ch-project-link-'+p.project_id;
             b.title=`${p.display_name || p.topic} · 最近活动 ${timeLabel(p.activity_at)}`;b.dataset.projectId=p.project_id;b.classList.toggle("selected",p.project_id===pid);b.setAttribute("aria-current",p.project_id===pid ? "true" : "false");
             const sameName=rows.filter(x=>(x.display_name||x.topic)===(p.display_name||p.topic)).length>1;
             if(sameName)b.append(E('small','ch-project-disambiguator',timeLabel(p.created_at || p.activity_at)+' · '+p.project_id.slice(-6)));
             if(p.data_status!=='available')b.append(E('small','ch-project-disambiguator','资料暂不可用'));
-            const row=E('div','ch-project-row');row.append(b,rowMenu('项目操作：'+(p.display_name||p.topic),()=>renameProject(p.project_id,p.display_name||p.topic),'最近活动：'+timeLabel(p.activity_at)+'；项目编号：'+p.project_id));target.append(row);
+            if(p.project_id===pid)b.append(E('small','ch-folder-current','当前项目'));
+            const row=E('div','ch-project-row ch-folder');row.dataset.projectId=p.project_id;
+            const expanded=g.expandedFolders.has(p.project_id),toggle=button(expanded?'▾':'▸',()=>toggleFolder(p.project_id),'ch-folder-toggle');
+            toggle.setAttribute('aria-label',(expanded?'收起':'展开')+'项目对话：'+name);toggle.setAttribute('aria-expanded',String(expanded));toggle.setAttribute('aria-controls','ch-folder-'+p.project_id);
+            toggle.setAttribute('aria-describedby',b.id);
+            const head=E('div','ch-folder-heading');head.append(toggle,b,rowMenu('项目操作：'+name,()=>renameProject(p.project_id,name),'最近活动：'+timeLabel(p.activity_at)+'；项目编号：'+p.project_id));
+            const children=E('div','ch-folder-conversations');children.id='ch-folder-'+p.project_id;children.hidden=!expanded;children.setAttribute('role','group');children.setAttribute('aria-label',name+'的对话'+(sameName?' · '+p.project_id.slice(-6):''));
+            row.append(head,children);target.append(row);if(expanded){paintFolder(p.project_id);if(!g.folders.has(p.project_id))loadFolder(p.project_id);}
         }
         if(!rows.length)target.append(E("p","ch-side-empty",q ? "没有匹配项目" : "尚无项目，首次发送后创建"));
         const expand=$("ch-project-expand");expand.hidden=!g.projectExpanded && g.projectNext===null;expand.textContent=g.projectExpanded ? "收起项目" : "展开更多";expand.setAttribute("aria-expanded",String(g.projectExpanded));
         if(g.projectExpanded && g.projectNext!==null)target.append(button("加载更多项目",()=>projects({append:true}),"ch-side-link"));
+        if(focusedToggle)[...target.querySelectorAll('.ch-folder')].find(n=>n.dataset.projectId===focusedToggle)?.querySelector('.ch-folder-toggle')?.focus({preventScroll:true});
     }
+    function toggleFolder(pid){
+        if(g.expandedFolders.has(pid))g.expandedFolders.delete(pid);else g.expandedFolders.add(pid);
+        store.set('sra.ch.expandedFolders',[...g.expandedFolders].slice(-30));paintProjects();
+    }
+    function paintFolder(pid){
+        const target=$('ch-folder-'+pid);if(!target||!g.expandedFolders.has(pid))return;
+        const data=g.folders.get(pid),route=g.app.getRoute();target.replaceChildren();target.setAttribute('aria-busy',String(!!data?.loading));
+        if(!data||data.loading&&!data.loaded)target.append(E('p','ch-side-caption','正在读取项目对话…'));
+        if(data?.loaded){
+            const duplicates=new Map();for(const c of data.rows)duplicates.set(c.title,(duplicates.get(c.title)||0)+1);
+            const pinned=g.pinnedConversation,rows=pinned?.project_id===pid&&pinned.conversation_id===route.conversationId&&!data.rows.some(c=>c.conversation_id===pinned.conversation_id)?[pinned,...data.rows]:data.rows;
+            for(const c of rows){
+                const row=E('div','ch-folder-chat');row.dataset.projectId=pid;row.dataset.conversationId=c.conversation_id;
+                const open=iconButton(c.title,()=>g.app.navigate({projectId:pid,conversationId:c.conversation_id,page:'dashboard'}),'ch-conversation-link','conversation');
+                const selected=route.projectId===pid&&route.conversationId===c.conversation_id;open.classList.toggle('selected',selected);if(selected)open.setAttribute('aria-current','page');
+                open.title=c.title+' · '+projectName(pid)+' · '+timeLabel(c.updated_at);
+                if(selected)open.append(E('small','ch-folder-current','当前对话'));
+                if(duplicates.get(c.title)>1)open.append(E('small','ch-project-disambiguator',timeLabel(c.updated_at)+' · '+c.conversation_id.slice(-6)));
+                row.append(open,rowMenu('对话操作：'+c.title,()=>renameConversation(pid,c.conversation_id,c.title),'所属项目：'+projectName(pid)+'；对话标识：'+c.conversation_id.slice(-6),()=>openMove(pid,c.conversation_id,c.title)));target.append(row);
+            }
+            if(!data.rows.length)target.append(E('p','ch-side-empty','尚无对话；明确发送后才保存。'));
+        }
+        if(data?.error){target.append(E('p','ch-side-error','项目对话读取失败：'+data.error),button('重试读取项目对话',()=>loadFolder(pid,{append:!!data.loaded}),'ch-side-link'));}
+        else if(data?.loaded&&data.next!==null){const more=button(data.loading?'正在读取…':'加载更多项目对话',()=>loadFolder(pid,{append:true}),'ch-side-link');more.disabled=data.loading;target.append(more);}
+        if(data?.loaded){const refresh=button('刷新项目对话',()=>loadFolder(pid),'ch-side-link ch-folder-refresh');refresh.disabled=data.loading;target.append(refresh);}
+        target.append(button('在本项目新建对话',()=>g.app.navigate({projectId:pid,conversationId:null,page:'dashboard'}),'ch-side-link ch-folder-new'));
+        const selected=target.querySelector('.ch-conversation-link[aria-current=page]'),key=pid+'/'+route.conversationId;
+        if(selected?.getClientRects().length&&g.revealedFolderConversation!==key){selected.scrollIntoView({block:'nearest'});g.revealedFolderConversation=key;}
+    }
+    async function loadFolder(pid,{append=false}={}){
+        let data=g.folders.get(pid);if(data?.loading||append&&data?.next===null)return;
+        if(!data){data={rows:[],next:null,loaded:false};g.folders.set(pid,data);}
+        const offset=append?data.next:0;data.loading=true;data.error=null;paintFolder(pid);
+        try{
+            await capabilities();const result=await request(`/api/projects/${encodeURIComponent(pid)}/conversations?limit=5&offset=${offset||0}`);
+            if(g.folders.get(pid)!==data)return;
+            if(result.conversations.some(c=>c.project_id!==pid))throw new Error('会话归属不匹配，请重新读取。');
+            data.rows=[...new Map((append?[...data.rows,...result.conversations]:result.conversations).map(c=>[c.conversation_id,c])).values()];data.next=result.next_offset;data.loaded=true;
+        }catch(e){if(g.folders.get(pid)===data)data.error=textError(e);}
+        finally{if(g.folders.get(pid)===data){data.loading=false;paintFolder(pid);}}
+    }
+    function invalidateFolder(pid){g.folders.delete(pid);paintProjects();}
     async function recentConversations(offset=0){
         const ticket=++g.recentTicket,target=$("ch-conversations");
         if(!g.recentLoaded)target.replaceChildren(E("p","ch-side-caption","正在读取最近对话…"));
@@ -210,20 +391,22 @@
         const query=$('ch-conversation-search').value.trim();
         const limit=offset?5:Math.min(50,g.recentWindow || 5);
         try{await catalogCapability();const data=await request(`/api/conversations/recent?limit=${limit}&offset=${offset}&q=${encodeURIComponent(query)}&include_project_id=${encodeURIComponent(selected.projectId || "")}&include_conversation_id=${encodeURIComponent(selected.conversationId || "")}`);if(ticket!==g.recentTicket)return;
-            g.recentLoaded=true;g.recent=offset ? [...g.recent,...data.conversations] : data.conversations;g.recentNext=data.next_offset;target.replaceChildren();
+            g.recentLoaded=true;g.recent=offset ? [...g.recent,...data.conversations] : data.conversations;g.recentNext=data.next_offset;g.pinnedConversation=data.current_conversation;target.replaceChildren();
             g.recentWindow=Math.min(50,Math.max(5,g.recent.length));
             const route=g.app.getRoute();
             let displayed=[...new Map(g.recent.map(c=>[`${c.project_id}/${c.conversation_id}`,c])).values()];
             if(!query && !offset && data.current_conversation && !displayed.some(c=>c.project_id===route.projectId && c.conversation_id===route.conversationId))displayed=[...displayed.slice(0,limit-1),data.current_conversation];
             for(const c of displayed){
                 const row=E("div","ch-conversation-row");row.dataset.conversationId=c.conversation_id;row.dataset.projectId=c.project_id;
-                const open=button(c.title,()=>g.app.navigate({projectId:c.project_id,conversationId:c.conversation_id,page:"dashboard"}),"ch-conversation-link");open.classList.toggle("selected",c.project_id===route.projectId && c.conversation_id===route.conversationId);open.title=`${c.title} · ${c.project_name} · ${timeLabel(c.updated_at)}`;
-                row.append(open,E("small","ch-project-context",c.project_name),rowMenu('对话操作：'+c.title,()=>renameConversation(c.project_id,c.conversation_id,c.title),'所属项目：'+c.project_name+'；最近更新：'+timeLabel(c.updated_at)+'；项目标识：'+c.project_id.slice(-6)));target.append(row);
+                const open=iconButton(c.title,()=>g.app.navigate({projectId:c.project_id,conversationId:c.conversation_id,page:"dashboard"}),"ch-conversation-link",'conversation');open.classList.toggle("selected",c.project_id===route.projectId && c.conversation_id===route.conversationId);if(c.project_id===route.projectId&&c.conversation_id===route.conversationId)open.setAttribute('aria-current','page');open.title=`${c.title} · ${c.project_name} · ${timeLabel(c.updated_at)}`;
+                const sameProjectName=new Set([...g.projects.filter(p=>(p.display_name||p.topic)===c.project_name).map(p=>p.project_id),...displayed.filter(other=>other.project_name===c.project_name).map(other=>other.project_id)]).size>1;
+                row.append(open,E("small","ch-project-context",c.project_name+(sameProjectName?' · '+c.project_id.slice(-6):'')),rowMenu('对话操作：'+c.title,()=>renameConversation(c.project_id,c.conversation_id,c.title),'所属项目：'+c.project_name+'；最近更新：'+timeLabel(c.updated_at)+'；项目标识：'+c.project_id.slice(-6),()=>openMove(c.project_id,c.conversation_id,c.title)));target.append(row);
             }
             if(!g.recent.length)target.append(E("p","ch-side-empty",query?'没有匹配的对话':'尚无对话，首次发送后保存。'));
             if(data.next_offset!==null)target.append(button("查看更多对话",()=>recentConversations(data.next_offset),"ch-side-link ch-more-conversations"));
             $('ch-conversation-collapse').hidden=g.recent.length<=5;
             if(data.unavailable_projects?.length)target.append(E("small","ch-side-caption",`${data.unavailable_projects.length} 个项目数据暂不可读，可到项目管理核对；未自动修复。`));
+            paintProjects();
         }catch(e){if(ticket===g.recentTicket)target.replaceChildren(E("p","ch-side-error",e.message),button("重试读取",()=>recentConversations(),"ch-side-link"));}
     }
     async function conversations(pid,offset=0,ticket=null){
@@ -241,7 +424,7 @@
                 if([...target.querySelectorAll('.ch-conversation-row')].some(row=>row.dataset.conversationId===c.conversation_id))continue;
                 const row=E("div","ch-conversation-row");
                 row.dataset.conversationId=c.conversation_id;
-                const open=button(c.title,()=>g.app.navigate({projectId:pid,conversationId:c.conversation_id,page:"dashboard"}),"ch-conversation-link");
+                const open=iconButton(c.title,()=>g.app.navigate({projectId:pid,conversationId:c.conversation_id,page:"dashboard"}),"ch-conversation-link",'conversation');
                 open.title=c.title+' · '+timeLabel(c.updated_at);open.classList.toggle("selected",c.conversation_id===g.app.getRoute().conversationId);
                 const time=E("small","",new Date(c.updated_at).toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}));
                 const rename=button("重命名",()=>renameConversation(pid,c.conversation_id,c.title),"ch-side-rename");rename.setAttribute("aria-label",`重命名对话：${c.title}`);
@@ -253,7 +436,7 @@
     }
     async function renameConversation(pid,cid,title){
         const value=window.prompt("重命名对话（不改变研究问题或进度）",title);if(!value?.trim())return;
-        try{const data=await request(`/api/projects/${encodeURIComponent(pid)}/conversations/${encodeURIComponent(cid)}`,{method:"PATCH",body:{title:value.trim()}});if(g.v?.cid===cid && g.v.pid===pid){g.v.meta=data.conversation;paintHeader(g.v);}conversations(g.app.getRoute().projectId);recentConversations();}
+        try{const data=await request(`/api/projects/${encodeURIComponent(pid)}/conversations/${encodeURIComponent(cid)}`,{method:"PATCH",body:{title:value.trim()}});if(g.v?.cid===cid && g.v.pid===pid){g.v.meta=data.conversation;paintHeader(g.v);}invalidateFolder(pid);conversations(g.app.getRoute().projectId);recentConversations();}
         catch(e){if(g.v)fail(g.v,e);}
     }
     async function renameProject(pid,title){const name=window.prompt('修改项目显示名称（不改变研究主题与主线）',title);if(!name?.trim())return;try{await request(`/api/projects/${encodeURIComponent(pid)}/identity`,{method:'PATCH',body:{display_name:name.trim()}});await projects();recentConversations();}catch(e){if(g.v)fail(g.v,e);}}
@@ -271,6 +454,8 @@
         const signature=JSON.stringify([v.messages,v.requests,v.material?.papers,v.suggestions,v.busy,v.remoteBusy,v.actionBusy,v.optionSending,v.teachingState]);
         if(v.messageSignature===signature && !force && !initial && !prepend)return;
         v.messageSignature=signature;
+        const last=v.messages.at(-1),newReport=last?.research_task_id && !v.reportSeen?.has(last.message_id);
+        v.reportSeen=v.reportSeen || new Set();for(const m of v.messages)if(m.research_task_id)v.reportSeen.add(m.message_id);
         v.taskDisplay=v.taskDisplay || new Map();box.querySelectorAll('.ch-task-card').forEach(n=>v.taskDisplay.set(n.dataset.taskId,{open:n.open,details:n.querySelector('.ch-task-diagnostics')?.open,source:n.querySelector('.ch-task-detail')?.open}));
         box.replaceChildren();
         v.r.welcome.hidden=v.messages.length>0 || !!v.pid;v.root.classList.toggle("has-messages",v.messages.length>0);
@@ -281,9 +466,9 @@
             if(m.seq)card.dataset.seq=m.seq;
             const heading=E("div","ch-message-heading");
             if(m.role==="assistant") {const av=E("span","rg-avatar rg-avatar-message");const img=E("img");img.src="/static/assets/research-guide.png";img.alt="";av.append(img);heading.append(av);}
-            heading.append(E("strong","",m.role==="user" ? "你" : "科研指导"),E("small","",m.content_source==="teaching_case" ? "案例讲解" : m.mode==="rules" ? "规则指导 · 未调用模型" : m.role==="assistant" ? "基于当前项目材料" : ""));
+            heading.append(E("strong","",m.role==="user" ? "你" : "科研指导"),E("small","",m.historical_project_context ? '历史讨论 · 原项目：'+m.history_project_name+' · '+m.history_project_id.slice(-6) : m.content_source==="teaching_case" ? "案例讲解" : m.research_task_id && m.mode==="rules" ? "规则目录整理 · 非模型内容综合" : m.mode==="rules" ? "规则指导 · 未调用模型" : m.role==="assistant" ? "基于当前项目材料" : ""));
             const containsPlan=(m.suggestion_ids||[]).some(sid=>v.suggestions.some(s=>s.suggestion_id===sid&&s.plan));
-            if(containsPlan && (v.material?.teaching || m.content.length>600)){card.append(heading,E('p','','方案草案已整理。请打开完整方案核对方法、依据与条件，再决定是否采纳。'));const original=E('details','ch-original-response');original.append(E('summary','','查看原回复与完整说明'),rich(visibleContent(v,m.content)));card.append(original);}else card.append(heading,rich(visibleContent(v,m.content)));
+            if(containsPlan && (v.material?.teaching || m.content.length>600)){card.append(heading,E('p','','方案草案已整理。请打开完整方案核对方法、依据与条件，再决定是否采纳。'));const original=E('details','ch-original-response');original.append(E('summary','','查看原回复与完整说明'),rich(visibleContent(v,m.content)));card.append(original);}else card.append(heading,rich(m.research_task_id ? m.content : visibleContent(v,m.content)));
             if(m.delivery_warnings?.length){const warning=E('details','ch-delivery-warning');warning.append(E('summary','','回答已保存，部分操作未提供'));for(const note of m.delivery_warnings)warning.append(E('p','',note));card.append(warning);}
             for(const sid of m.suggestion_ids || []){const s=v.suggestions.find(s=>s.suggestion_id===sid);if(!s)continue;
                 if(s.kind==="plan" && s.plan)card.append(planPreview(v,s));
@@ -292,15 +477,22 @@
             if(m.role==="assistant" && m.questions?.length){const questions=E("section","ch-guide-questions");questions.setAttribute("aria-label","需要你确认的问题");questions.append(E("small","","需要你确认"));for(const q of m.questions)questions.append(E("p","",q));card.append(questions);}
             const references=v.material?.teaching && m.cited_paper_ids?.length ? E("details","case-citations") : card;
             if(references!==card){references.append(E("summary","",`引用资料 · ${m.cited_paper_ids.length} 篇（已准备好）`));card.append(references);}
-            for(const id of m.cited_paper_ids || [])references.append(button(`引用：${v.material?.papers?.find(p=>p.paper_id===id)?.title || '查看来源'}`,()=>openMaterial(v,"papers",id),"ch-citation"));
+            for(const id of m.cited_paper_ids || []){const frozen=(m.report_citations||[]).find(p=>p.paper_id===id);references.append(button(`引用${frozen?' ['+frozen.number+']':''}：${frozen?.title || v.material?.papers?.find(p=>p.paper_id===id)?.title || '查看来源'}`,()=>openMaterial(v,"papers",id),"ch-citation"));}
+            if(m.research_task_id && m.report_version){
+                const controls=E('div','ch-task-controls');
+                controls.append(button('打开完整报告',()=>openMaterial(v,'report',m.research_task_id,m.report_version),'ch-text-button'));
+                const a=E('a','ch-text-button','保存文献目录');a.href=BASE+`/api/projects/${encodeURIComponent(v.pid)}/research-tasks/${encodeURIComponent(m.research_task_id)}/export?version=${m.report_version}&catalog=true`;a.setAttribute('download','');controls.append(a);
+                controls.append(button('查看任务详情',()=>{const task=v.r.messages.querySelector(`.ch-task-card[data-task-id="${CSS.escape(m.research_task_id)}"]`);if(task){task.open=true;const detail=task.querySelector('.ch-task-diagnostics');if(detail)detail.open=true;task.scrollIntoView({block:'nearest'});}},'ch-text-button'));
+                card.append(controls);
+            }
             if(m.role==="assistant"){
                 const replies=m.suggested_replies || [], actions=m.actions || [];
                 if(replies.length){const group=E("section","ch-reply-options");group.setAttribute("aria-label","继续讨论（点击发送）");group.append(E("small","","继续讨论 · 点击发送对应内容"));
-                    for(const option of replies){const b=button(option.label,()=>chooseReply(v,m,option),"ch-reply-option");b.append(E("span","",option.content));b.title=option.content;b.disabled=v.busy || v.remoteBusy || v.optionSending || !v.writable;group.append(b);}card.append(group);}
-                if(actions.length){const group=E("section","ch-action-options");group.setAttribute("aria-label","明确操作（不发送聊天）");group.append(E("small","","明确操作 · 不发送聊天、不启动研究"));
+                    for(const option of replies){const b=button(option.label,()=>chooseReply(v,m,option),"ch-reply-option");b.append(E("small","ch-option-expectation",option.explanation ? "讨论预期："+option.explanation : "将发送下面的讨论请求，回答后再核对结果。"),E("span","ch-option-content","发送内容："+option.content));b.title=option.content;b.disabled=v.busy || v.remoteBusy || v.optionSending || !v.writable;group.append(b);}card.append(group);}
+                if(actions.length){const group=E("section","ch-action-options");group.setAttribute("aria-label","明确操作（不发送聊天）");group.append(E("small","","明确操作 · 请核对下方行为说明"));
                     for(const action of actions){const proposal=v.suggestions.find(s=>s.suggestion_id===action.suggestion_id), stale=proposal && (proposal.basis_changed!==false || !proposal.material_fingerprint || !!proposal.applied_item_id);
                         const isSearch=action.type==="start_search", capMissing=isSearch && !g.cap?.research_search;
-                        const b=button(action.label + (isSearch && action.topic ? `：${action.topic}` : ""),capMissing ? ()=>notice(v,"当前后端尚未接入检索能力。") : ()=>runAction(v,m,action),"btn btn-secondary ch-action-card");b.dataset.actionType=action.type;b.disabled=action.enabled===false || stale || v.actionBusy || capMissing;b.title=capMissing ? "后端未接入检索能力" : stale ? "草案已采纳或依据待复核，请查看研究材料" : action.disabled_reason || "由服务端核对后执行";group.append(b);if(action.disabled_reason)group.append(E("small","ch-warning",action.disabled_reason));}card.append(group);}
+                        const b=button(action.label + (isSearch && action.topic ? `：${action.topic}` : ""),capMissing ? ()=>notice(v,"当前后端尚未接入检索能力。") : ()=>runAction(v,m,action),"btn btn-secondary ch-action-card");b.append(E('small','ch-option-expectation',({view_references:'打开已有引用资料，不重新检索；阅读范围以实际内容为准。',open_plan:'打开已有正式方案，不生成新版本。',open_settings:'打开讨论设置，不发送消息或调用模型。',adopt_suggestion:'请求采纳这条草案；服务端再次校验依据后写入正式记录。',start_search:'先核对范围并明确确认，再发起检索；可能产生费用。'})[action.type]||'暂不支持此操作。'));b.dataset.actionType=action.type;b.disabled=action.enabled===false || stale || v.actionBusy || capMissing;b.title=capMissing ? "后端未接入检索能力" : stale ? "草案已采纳或依据待复核，请查看研究材料" : action.disabled_reason || "由服务端核对后执行";group.append(b);if(action.disabled_reason)group.append(E("small","ch-warning",action.disabled_reason));}card.append(group);}
             }
             if(m.role==="user" && m.request_id){
                 const req=v.requests[m.request_id], status=req?.status || m.request_status;
@@ -312,7 +504,17 @@
                     if(audit.length){const detail=E("details");detail.append(E("summary","","调用与耗时记录"));for(const e of audit.filter(e=>e.event==="network" || e.event==="phase"))detail.append(E("p","small",`${e.event==="network"?'实际请求':'处理步骤'} · ${e.name} · ${e.outcome} · ${e.elapsed_ms==null?'尚未结束':(e.elapsed_ms/1000).toFixed(2)+'秒'}${e.event==='network'?' · token '+(e.usage?.total_tokens ?? '未知')+' · 费用 '+(e.cost ?? '未知'):''}`));statusNode.append(detail);}
                     if(req?.error || m.error)statusNode.append(E("p","",req?.error || m.error));
                     if(g.cap?.call_audit && !audit.length && ["failed","interrupted","processing"].includes(status))statusNode.append(button("核对状态与调用记录",()=>checkRequest(v,m.request_id)));
-                    if(["failed","interrupted"].includes(status))statusNode.append(button("重试此消息",()=>retry(v,m.request_id)));
+                    const failure=req?.failure;
+                    if(failure?.notice)statusNode.append(E('p','small',failure.notice));
+                    if(failure && ["failed","interrupted"].includes(status)){
+                        const used=failure.model_attempts_used,limit=failure.model_attempts_limit;
+                        statusNode.append(E("p","small",`模型网络尝试：${used}/${limit}；剩余 ${failure.model_attempts_remaining} 次。`));
+                        if(failure.retry_after_seconds)statusNode.append(E("p","small",`请等待约 ${Math.ceil(failure.retry_after_seconds)} 秒后核对状态。`));
+                    }
+                    if(["failed","interrupted"].includes(status) && failure?.can_retry)statusNode.append(button("重试此消息",()=>retry(v,m.request_id)));
+                    if(failure?.can_restart)statusNode.append(button("重新发起本次生成",()=>restartRound(v,m.request_id),"btn btn-secondary"),E("p","small","将再次调用模型，可能产生费用；保留原失败记录与正式方案。"));
+                    const child=req?.recovery_request_id;
+                    if(child){const round=v.requests[child];statusNode.append(E("p","small",`新一轮处理：${round?.status || "待核对"}。原请求仍保留为失败。`));if(round?.failure?.can_retry)statusNode.append(button("重试新一轮",()=>retry(v,child)));}
                     if(["unknown","not_submitted"].includes(status)){
                         statusNode.append(button("查询原请求",()=>checkRequest(v,m.request_id)));
                         if(v.pending?.body.request_id===m.request_id)statusNode.append(button("用原请求重新提交",()=>resend(v)));
@@ -324,7 +526,8 @@
             box.append(card);
         }
         paintTasks(v);
-        if(initial || force || (near && !prepend))box.scrollTop=box.scrollHeight;
+        if(newReport && (initial || near) && !prepend){const lead=box.querySelector(`[data-message-id="${CSS.escape(last.message_id)}"]`);if(lead)box.scrollTop+=lead.getBoundingClientRect().top-box.getBoundingClientRect().top-8;}
+        else if(initial || force || (near && !prepend))box.scrollTop=box.scrollHeight;
         else if(prepend)box.scrollTop=top+(box.scrollHeight-height);
         else {box.scrollTop=top;v.r.latest.hidden=false;}
     }
@@ -337,6 +540,7 @@
             if(replace){const end=Math.max(0,...data.messages.map(m=>m.seq || 0));v.messages=v.messages.filter(m=>m.optimistic || m.seq>end);}
             merge(v,data.messages);v.before=data.next_before;paintMessages(v,{initial:!earlier,prepend:earlier});
             for(const m of data.messages)if(m.request_id && ["processing","failed","interrupted"].includes(m.request_status))v.requests[m.request_id]={...v.requests[m.request_id],status:m.request_status,error:m.error};
+            for(const m of data.messages)if(m.role==="user" && m.request_id && ["failed","interrupted"].includes(m.request_status))await checkRequest(v,m.request_id,true);
             paintMessages(v);schedule(v);
         }catch(e){if(e.name!=="AbortError")fail(v,e);}finally{v.loadingEarlier=false;if(current(v))v.r.earlier.disabled=false;}
     }
@@ -418,11 +622,13 @@
         if(!v.material){box.append(E("p","muted","首次发送后，这里会显示当前项目共享的研究材料。"));return;}
         const flow=v.material.workflow, fields=[["已确认研究问题",flow?.flow?.question],["当前正式方案",flow?.flow?.plan]];
         const group=(n,id)=>{n.dataset.materialGroup=id;box.append(n);return n;};
+        const background=E('section','ch-material-block');background.dataset.materialKind='background';background.append(E('h3','','项目背景'));
+        window.SRA_PROJECT_BACKGROUND.view(background,{projectId:v.pid,workspace:v.material.workspace,app:g.app,onSaved:()=>{if(current(v))return refreshMaterials(v);}});group(background,'overview');
         for(const [label,item] of fields){if(!item)continue;const block=E("section","ch-material-block");block.dataset.materialKind=item.kind==='plan'?'plan':'question';block.append(E("h3","",label),E('strong','',item.title));if(item.kind==='plan')block.append(planReview(v,item,false));else block.append(rich(visibleContent(v,item.content)));if(item.needs_review)block.append(E("p","ch-warning","依据已变化，请先复核。"));group(block,item.kind==='plan'?'plans':'overview');}
         const papers=E("details","ch-material-block");papers.append(E("summary","",`论文与引用来源 · ${v.material.papers.length}`),E("p","muted","可选择至多 3 篇作为本次讨论参考；论文标题保留原文。"));
         papers.dataset.materialKind="papers";
         for(const p of v.material.papers){const d=E("details","ch-paper-card");d.dataset.paperId=p.paper_id;d.append(E("summary","",p.title),E("p","muted small",`${(p.authors || []).join('、')} · ${p.year || '年份待核对'}`),E("p","",`阅读范围：${p.reading_scope || p.scope}`),E("p","",p.abstract || "尚无摘要，仅可核对元信息。"));if(p.relevance)d.append(E("p","",`与当前讨论的关系：${p.relevance}`));if(/^https?:\/\//i.test(p.url || '')){const a=E("a","","原始来源（外部链接，需要网络）");a.href=p.url;a.target="_blank";a.rel="noopener noreferrer";d.append(a);}
-            const label=E("label","ch-paper","作为本次讨论参考");const input=E("input");input.type="checkbox";input.checked=v.paperIds.includes(p.paper_id);input.onchange=()=>{if(input.checked && v.paperIds.length>=3){input.checked=false;notice(v,"最多选择三篇参考论文。");return;}v.paperIds=input.checked ? [...v.paperIds,p.paper_id] : v.paperIds.filter(id=>id!==p.paper_id);};label.prepend(input);d.append(label);papers.append(d);}papers.open=true;
+            const label=E("label","ch-paper","作为本次讨论参考");const input=E("input");input.type="checkbox";input.checked=v.paperIds.includes(p.paper_id);input.onchange=()=>{if(input.checked && v.paperIds.length>=3){input.checked=false;notice(v,"最多选择三篇参考论文。");return;}v.paperIds=input.checked ? [...v.paperIds,p.paper_id] : v.paperIds.filter(id=>id!==p.paper_id);saveDraft(v);};label.prepend(input);d.append(label);papers.append(d);}papers.open=true;
         if(v.material.papers.length)group(papers,'papers');
         const reports=E('section','ch-material-block');reports.dataset.materialKind='reports';reports.append(E('h3','','研究现状报告'));group(reports,'papers');
         if(v.material.material_counts?.research_reports){reports.append(button('查看已保存报告',()=>loadMaterialReports(v),'ch-text-button'));}else reports.append(E('p','muted','尚无已保存报告。'));
@@ -447,22 +653,25 @@
         papers.open=true;selectMaterialTab(v,v.materialTab || 'overview',{reset:false});v.r.materialScroll.scrollTop=top;
         if(v.reportsVisible)loadMaterialReports(v).catch(e=>fail(v,e));
     }
-    async function loadMaterialReports(v,{id=null,offset=0}={}){
+    async function loadMaterialReports(v,{id=null,version=null,offset=0}={}){
         const pid=v.pid,ticket=v.reportTicket=(v.reportTicket||0)+1,box=v.r.materialBody.querySelector('[data-material-kind="reports"]');if(!box)return;
         v.reportsVisible=true;if(!offset)box.replaceChildren(E('h3','','研究现状报告'),E('p','muted','正在读取已保存报告…'));
         try{const data=await request(`/api/projects/${encodeURIComponent(pid)}/workspace/materials?kind=reports&limit=20&offset=${offset}`,{signal:v.reads.signal});if(!current(v)||v.pid!==pid||ticket!==v.reportTicket)return;
             // A message may refer to a report older than the first catalog page.
             // Read that exact task through its project/conversation-scoped API;
             // do not fetch all pages or infer a report from model text.
-            if(id&&!data.entries.some(e=>e.task_id===id)){
+            if(id&&!data.entries.some(e=>e.task_id===id && (version===null || e.version===version))){
                 const task=await request(path(v,'/research-tasks/'+encodeURIComponent(id)),{signal:v.reads.signal});if(!current(v)||v.pid!==pid||ticket!==v.reportTicket)return;
                 if(!task.report)throw new Error('该任务尚无已保存报告，可返回原任务查看状态。');
-                const version=task.report_versions?.at(-1)?.version;
-                data.entries.unshift({task_id:id,title:task.topic,status_label:task.status_label,version,url:`/api/projects/${encodeURIComponent(pid)}/research-tasks/${encodeURIComponent(id)}/export`+(version?'?version='+version:'')});
+                const selected=version===null ? task.report_versions?.at(-1) : task.report_versions?.find(e=>e.version===version);
+                if(version!==null&&!selected)throw new Error('该报告版本不存在；未替换为其他版本。');
+                const chosenVersion=selected?.version;
+                data.entries.unshift({task_id:id,title:task.topic,status_label:selected?.status_label || task.status_label,version:chosenVersion,url:`/api/projects/${encodeURIComponent(pid)}/research-tasks/${encodeURIComponent(id)}/export`+(chosenVersion?'?version='+chosenVersion:'')});
             }
             if(!offset)box.replaceChildren(E('h3','','研究现状报告'));box.querySelector('.ch-more-reports')?.remove();
             for(const entry of data.entries){
                 const row=E('details','ch-report-card');row.dataset.reportId=entry.task_id||entry.key;
+                row.dataset.reportVersion=entry.version ?? '';
                 row.append(E('summary','',entry.title+' · '+(entry.label||'已保存报告')+' · '+(entry.version?'v'+entry.version+' · ':'')+(entry.status_label||'')));
                 const content=E('div');row.append(content);
                 row.addEventListener('toggle',async()=>{
@@ -475,10 +684,10 @@
                     }catch(e){row.dataset.loaded='';content.textContent=e.name==='AbortError'?'':e.message;}
                 });box.append(row);
             }
-            if(id){const target=box.querySelector(`[data-report-id="${CSS.escape(id)}"]`);if(target){target.open=true;target.tabIndex=-1;target.scrollIntoView({block:'start'});target.focus({preventScroll:true});}}
+            if(id){const target=box.querySelector(`[data-report-id="${CSS.escape(id)}"]${version===null?'':`[data-report-version="${version}"]`}`);if(target){target.open=true;target.tabIndex=-1;target.scrollIntoView({block:'start'});target.focus({preventScroll:true});}}
             if(!data.entries.length&&!offset)box.append(E('p','muted','尚无已保存报告。'));
             if(data.next_offset!==null)box.append(button('更多报告',()=>loadMaterialReports(v,{offset:data.next_offset}),'ch-text-button ch-more-reports'));
-        }catch(e){if(current(v)&&e.name!=='AbortError')box.replaceChildren(E('p','ch-warning',textError(e)),button('重试读取报告',()=>loadMaterialReports(v,{id})));}
+        }catch(e){if(current(v)&&e.name!=='AbortError')box.replaceChildren(E('p','ch-warning',textError(e)),button('重试读取报告',()=>loadMaterialReports(v,{id,version})));}
     }
     async function adopt(v,sid){
         if(v.adopting)return;v.adopting=true;
@@ -516,7 +725,7 @@
             const pending="## 待讨论事项\n\n"+item.plan.unconfirmed.map(s=>"- "+s).join("\n\n");
             if(item.plan.unconfirmed.length)body=body.replace(pending,"");
         }
-        box.append(E("p","muted small",v.material?.teaching ? "教学方案 · 预置资料，未执行。结构与依据检查仅供讨论。" : "结构与依据检查仅供讨论；方案尚未执行，结论未验证。"),rich(visibleContent(v,body)));
+        box.append(E("p","muted small",v.material?.teaching ? "教学方案 · 预置资料，未执行。结构与依据检查仅供讨论。" : "结构与依据检查仅供讨论；历史版本可能按较早规则生成，读取时不会重验或改写原正文。方案尚未执行，结论未验证。"),rich(visibleContent(v,body)));
         if(item.plan?.unconfirmed.length)box.append(E("p","ch-warning","待确认／待讨论："+item.plan.unconfirmed.join("；")));
         const metadata=E("details","ch-plan-metadata");metadata.append(E("summary","","版本与技术详情"),E("p","muted small",`模板：${item.plan?.template_version || '旧结构'}；记录：${item.item_id || item.suggestion_id}；问题记录：${q?.item_id || '需核对'}；修订记录：${item.supersedes_id || '无'}`));box.append(metadata);
         const controls=E("div","ch-plan-controls");
@@ -577,7 +786,9 @@
     function pendingSave(v){if(v.pending)store.set(pendingKey(v),v.pending);}
     function clearPending(v,rid){if(v.pending?.body.request_id===rid){v.pending=null;store.remove(pendingKey(v));}}
     function applyResponse(v,result){
-        v.requests[result.request_id]={status:result.status,error:result.error,callAudit:result.call_audit};merge(v,result.messages || []);
+        v.requests[result.request_id]={status:result.status,error:result.error,callAudit:result.call_audit,failure:result.failure,recovery_request_id:result.recovery_request_id,recovery_of:result.recovery_of};
+        if(result.recovery_of)v.requests[result.recovery_of]={...v.requests[result.recovery_of],recovery_request_id:result.request_id};
+        merge(v,result.messages || []);
         if(result.status==="completed" || result.status==="failed" || result.status==="interrupted"){
             clearPending(v,result.request_id);
             if(v.waitingNotice===result.request_id){notice(v,"");v.waitingNotice=null;}
@@ -593,28 +804,107 @@
             schedule(v);
         },2500);
     }
-    async function checkRequest(v,rid,quiet=false){
-        if(!v.cid)return;
-        try{const data=await request(path(v,`/requests/${encodeURIComponent(rid)}`),{signal:v.reads.signal});if(!current(v))return;
-            v.deliveryBusy=data.status==='completed';applyResponse(v,data);
-            try{if(data.status==="completed"){await newMessages(v);await refreshMaterials(v);}}
-            finally{v.deliveryBusy=false;if(current(v))paintHeader(v);}}
-        catch(e){if(!current(v) || e.name==="AbortError")return;
-            if(e.status===404){
-                if(!String(e.message).includes("消息请求")){v.writable=false;v.requests[rid]={status:"unavailable",error:textError(e)};fail(v,e);}
-                else v.requests[rid]={status:"not_submitted",error:"尚未查到原请求。请核对网络后主动用原请求提交，不会自动重发。"};
-                v.remoteBusy=Object.values(v.requests).some(r=>r.status==="processing");paintMessages(v);paintHeader(v);
-            }
-            else if(!quiet)fail(v,e);
+    function composerMatches(v,body){
+        return v.r.input.value.trim()===body.content && !attachment(v) && !v.planRequest
+            && (v.selectedItemId || null)===(body.selected_item_id || null)
+            && JSON.stringify(v.paperIds)===JSON.stringify(body.selected_paper_ids || []);
+    }
+    function clearAcceptedInput(v,body,version){
+        if(current(v) && v.inputVersion===version && composerMatches(v,body)){
+            v.r.input.value='';v.inputVersion++;saveDraft(v);
         }
     }
-    async function postMessage(v,body,retry=false){
+    async function originalState(v,rid){
+        try{return {chat:await request(path(v,`/requests/${encodeURIComponent(rid)}`),{signal:v.reads.signal})};}
+        catch(e){if(e.status!==404 || !String(e.message).includes('消息请求'))throw e;}
+        // Explicit search messages live in the existing task table, not the chat
+        // request table. Absence must be established there too before rebasing.
+        if(g.cap?.research_search){
+            let offset=0;
+            for(let page=0;page<10;page++){
+                const rows=await request(path(v,`/research-tasks?limit=100&offset=${offset}`),{signal:v.reads.signal});
+                const task=rows.tasks.find(t=>t.request_id===rid);
+                if(task)return {task};
+                if(rows.next_offset==null)return null;
+                offset=rows.next_offset;
+            }
+            throw new Error('原检索历史较多，尚未完成请求核对。请查看任务记录；未修改原请求或重新提交。');
+        }
+        return null;
+    }
+    async function checkRequest(v,rid,quiet=false){
+        if(!v.cid)return;
+        try{
+            const known=await originalState(v,rid);if(!current(v))return;
+            if(!known){
+                v.requests[rid]={status:'not_submitted',error:v.pending?.needs_review?'研究材料已有更新，请核对依据后用原请求继续；原输入与编号保留。':'尚未查到原请求。请核对后主动用原请求提交，不会自动重发。'};
+                v.remoteBusy=Object.values(v.requests).some(r=>r.status==='processing');paintMessages(v);paintHeader(v);return null;
+            }
+            if(known.task){v.requests[rid]={status:'completed'};clearPending(v,rid);registerTask(v,known.task);return known;}
+            const data=known.chat;
+            v.deliveryBusy=data.status==='completed';applyResponse(v,data);
+            if(data.recovery_request_id && !v.requests[data.recovery_request_id]?.status)await checkRequest(v,data.recovery_request_id,true);
+            try{if(data.status==='completed'){await newMessages(v);await refreshMaterials(v);}}
+            finally{v.deliveryBusy=false;if(current(v))paintHeader(v);}
+            return known;
+        }catch(e){
+            if(!current(v) || e.name==='AbortError')return;
+            if(e.data?.detail?.code==='conversation_moved'){v.requests[rid]={status:'moved',error:e.message};fail(v,e);return;}
+            if(e.status===404){v.writable=false;v.requests[rid]={status:'unavailable',error:textError(e)};}
+            if(!quiet || e.status===404)fail(v,e);
+            return undefined; // Unconfirmed is never permission to rebase/resubmit.
+        }
+    }
+    async function reviewPending(v,pending){
+        await refreshMaterials(v);if(!current(v)||v.pending!==pending)return false;
+        const revision=v.material.workspace.revision,brief=v.material.workspace.brief || {};
+        const confirmed=await new Promise(resolve=>{
+            const dialog=E('dialog','case-dialog');dialog.setAttribute('aria-label','核对更新后的研究依据');
+            const finish=value=>{dialog.close();dialog.remove();resolve(value);};
+            dialog.append(E('h3','','核对更新后的研究依据'),E('p','',`原请求使用版本 ${pending.body.expected_revision}，当前是版本 ${revision}。请核对当前条件和原引用，再决定是否继续。`));
+            dialog.append(E('p','small','原请求：'+pending.body.content));
+            for(const id of pending.body.selected_paper_ids || [])dialog.append(E('p','small','原引用资料：'+(v.material.papers.find(p=>p.paper_id===id)?.title || id)));
+            if(pending.body.selected_item_id)dialog.append(E('p','small','原采纳目标：'+(v.material.workspace.items.find(i=>i.item_id===pending.body.selected_item_id)?.title || pending.body.selected_item_id)));
+            for(const [key,label] of Object.entries({goal:'研究目标',question:'研究问题',resources:'资源／设备',time_budget:'期限',constraints:'限制条件'})){
+                if(brief[key])dialog.append(E('p','small',label+'：'+brief[key]));
+            }
+            dialog.append(E('p','small','继续只提交原内容及原附件／目标，不会提交等待期间的新编辑。可能调用模型；正式问题与方案仍须明确采纳。'),
+                button('确认已核对，继续原请求',()=>finish(true),'btn'),button('返回核对，暂不提交',()=>finish(false)));
+            dialog.addEventListener('cancel',e=>{e.preventDefault();finish(false);},{once:true});v.root.append(dialog);dialog.showModal();
+        });
+        if(!confirmed||!current(v)||v.pending!==pending)return false;
+        const known=await checkRequest(v,pending.body.request_id,true);
+        if(known!==null||!current(v)||v.pending!==pending){if(current(v))notice(v,'原请求已接受或状态尚未确认，未修改请求依据；请先核对原状态。');return false;}
+        const latest=await request(`/api/projects/${encodeURIComponent(v.pid)}/workspace?include_chat=false`,{signal:v.reads.signal});
+        if(!current(v)||v.pending!==pending)return false;
+        if(latest.workspace.revision!==revision){notice(v,'核对期间研究材料再次变化，请重新核对后继续；原输入与编号保留。');return false;}
+        pending.body={...pending.body,expected_revision:revision};pending.needs_review=false;pendingSave(v);
+        return true;
+    }
+    async function resumePending(v,{requireSameInput=false,composeVersion=v.inputVersion}={}){
+        if(v.busy||v.remoteBusy||!v.pending)return;
+        const pending=v.pending;v.busy=true;paintHeader(v);
+        try{
+            const known=await checkRequest(v,pending.body.request_id,true);
+            if(!current(v)||v.pending!==pending){if(known)clearAcceptedInput(v,pending.body,composeVersion);return;}
+            if(known!==null){if(known)clearAcceptedInput(v,pending.body,composeVersion);notice(v,known?'原请求已由服务端接受，已核对原状态，未重复发送。':'原请求状态尚未确认，请先查询；未修改内容或开启新轮次。');return;}
+            if(requireSameInput && !composerMatches(v,pending.body)){
+                notice(v,'当前文字、附件或采纳目标与原请求不同。请先用“用原请求重新提交”核对原内容；当前新编辑保留，之后可单独发送。');return;
+            }
+            if(pending.needs_review && !await reviewPending(v,pending))return;
+            if(!current(v)||v.pending!==pending)return;
+            await postMessage(v,pending.body,false,composeVersion);
+        }catch(e){if(current(v))fail(v,e);}
+        finally{v.busy=false;if(current(v))paintHeader(v);}
+    }
+    async function postMessage(v,body,retry=false,composeVersion=v.inputVersion){
         v.busy=true;v.requests[body.request_id]={status:"processing"};v.remoteBusy=true;paintHeader(v);paintMessages(v);schedule(v);
         try{
             const url=retry ? path(v,`/requests/${encodeURIComponent(body.request_id)}/retry`) : path(v,"/messages");
             // Do NOT attach navigation's read AbortSignal to a generation POST.
             const delivery=g.cap?.background_plan ? {wait_for_completion:false} : {};
             const result=await request(url,{method:"POST",body:retry ? delivery : {...body,...delivery}});
+            clearAcceptedInput(v,body,composeVersion);
             if(current(v)){applyResponse(v,result);if(result.status==="completed"){await newMessages(v);await refreshMaterials(v);}}
             if(result.status==="search_started"){
                 // 检索任务已接受：用户消息由任务服务持久化，轮询由任务卡片接管。
@@ -624,10 +914,31 @@
             }
             if(result.status==="completed" || result.status==="failed")clearPending(v,body.request_id);
         }catch(e){
-            if(e.data?.request_id){if(current(v))applyResponse(v,e.data);if(["failed","interrupted","completed"].includes(e.data.status))clearPending(v,body.request_id);}
+            if(e.data?.detail?.code==='conversation_moved'){
+                if(current(v)){v.requests[body.request_id]={status:'moved',error:e.message};saveDraft(v);fail(v,e);}return;
+            }
+            if(e.status===429 && ['account_busy','system_busy'].includes(e.data?.reason_code)){
+                if(current(v)){
+                    v.requests[body.request_id]={status:'not_submitted',error:e.message};
+                    v.remoteBusy=Object.values(v.requests).some(r=>r.status==='processing');
+                    if(v.pending?.body.request_id===body.request_id){v.pending.capacity_rejected=true;pendingSave(v);}
+                    saveDraft(v);fail(v,e);
+                }
+                return;
+            }
+            if(e.data?.request_id){clearAcceptedInput(v,body,composeVersion);if(current(v))applyResponse(v,e.data);if(["failed","interrupted","completed"].includes(e.data.status))clearPending(v,body.request_id);}
             else if(current(v)){
                 v.requests[body.request_id]={status:"unknown",error:e.status===409 ? e.message : "响应未确认，正在查询原请求；切换页面不会取消服务端生成。"};
-                await checkRequest(v,body.request_id,true);
+                const known=await checkRequest(v,body.request_id,true);
+                if(known)clearAcceptedInput(v,body,composeVersion);
+                if(known===null && e.status===409 && v.pending?.body.request_id===body.request_id){
+                    v.pending.needs_review=true;pendingSave(v);
+                    await refreshMaterials(v).catch(()=>{});
+                    if(current(v) && v.pending?.body.request_id===body.request_id){
+                        e=new Error('研究材料版本已变化，请核对当前依据，再用原请求继续。原文字、附件关联与请求编号保留。');
+                        v.requests[body.request_id].error=e.message;
+                    }
+                }
             }
             if(current(v)){
                 const status=v.requests[body.request_id]?.status;
@@ -661,8 +972,10 @@
     function chooseFile(v){
         if(!current(v))return;
         const input=E('input');input.type='file';input.accept='.pdf,.txt,.md';input.setAttribute('aria-label','选择待上传论文');
-        input.onchange=()=>{
+        input.onchange=async()=>{
             if(!input.files.length||!current(v))return;
+            try{await window.SRA_RESOURCES?.checkFile(input.files[0]);}catch(e){fail(v,e);return;}
+            if(!current(v))return;
             const f=input.files[0],old=store.get(fileKey(v));
             // Every selection is new, even the same File, filename or contents.
             // An existing upload identity is only a retry candidate: its hash is
@@ -676,6 +989,7 @@
         if(!snapshot)return;
         const saved={...snapshot.state},memory=snapshot.memory,f=memory?.file;
         if(!f)throw new Error('请重新选择待上传文件，再继续原项目；不会重新创建项目。');
+        await window.SRA_RESOURCES?.checkFile(f);
         const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await f.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('');
         if(saved.hash && saved.hash!==hash)throw new Error('文件内容与上次上传不同。请先核对原上传，或明确移除后另行导入。');
         const previous=saved.request_id;
@@ -712,6 +1026,8 @@
     }
     async function firstSend(v,text){
         if(v.busy || !v.writable)return;
+        const composeVersion=v.inputVersion;
+        if(v.pending && !v.pending.awaiting_upload){await resumePending(v,{requireSameInput:true,composeVersion});return;}
         try{attachment(v,{requireFile:true});}catch(e){fail(v,e);paintFile(v);return;}
         if(v.material?.teaching&&!v.cid){notice(v,'请继续原案例，或明确开始自己的研究；这里不会创建不可使用的对话。');return;}
         if(!v.pid && !v.startPending && (!v.r.domain.value || !v.domainConfirmed)){if(v.domainDialog)return;v.domainDialog=true;const ok=await confirmDomain(v);v.domainDialog=false;if(!ok||!current(v))return;}
@@ -734,23 +1050,23 @@
                     if(g.files.get(oldScope)?.selection_id===id)g.files.delete(oldScope);
                 }
                 v.pending={body:start.message,awaiting_upload:!!fileSnapshot};v.planRequest=null;v.r.planPending.textContent="";pendingSave(v);if(store.get(oldKey)?.request_id===start.request_id)store.remove(oldKey);
-                if(current(v)){g.app.adopt(v.pid,v.cid);if(store.get(oldDraft)?.text?.trim()===start.message.content)store.remove(oldDraft);saveDraft(v);await projects();conversations(v.pid);}
+                if(current(v)){g.app.adopt(v.pid,v.cid);g.folders.delete(v.pid);if(store.get(oldDraft)?.text?.trim()===start.message.content)store.remove(oldDraft);saveDraft(v);await projects();conversations(v.pid);}
                 await uploadSelected(v,fileSnapshot);v.pending.awaiting_upload=false;v.pending.body.selected_paper_ids=v.paperIds.slice();pendingSave(v);
                 const data=await request(`/api/projects/${encodeURIComponent(v.pid)}/workspace?include_chat=false`);v.material=data;
                 v.pending.body.expected_revision=data.workspace.revision;pendingSave(v);
                 merge(v,[{message_id:"pending:"+start.message.request_id,request_id:start.message.request_id,role:"user",content:start.message.content,optimistic:true,request_status:"processing"}]);
-                if(current(v)){if(v.r.input.value.trim()===start.message.content)v.r.input.value='';saveDraft(v);setSettings(v,v.meta);paintHeader(v);paintMessages(v,{force:true});}
-                await postMessage(v,v.pending.body);
+                if(current(v)){saveDraft(v);setSettings(v,v.meta);paintHeader(v);paintMessages(v,{force:true});}
+                await postMessage(v,v.pending.body,false,composeVersion);
             }else{
-                if(v.pending?.awaiting_upload){await uploadSelected(v);await refreshMaterials(v);v.pending.awaiting_upload=false;v.pending.body.selected_paper_ids=v.paperIds.slice();v.pending.body.expected_revision=v.material.workspace.revision;pendingSave(v);if(current(v)&&v.r.input.value.trim()===v.pending.body.content){v.r.input.value='';saveDraft(v);}await postMessage(v,v.pending.body);return;}
+                if(v.pending?.awaiting_upload){await uploadSelected(v);await refreshMaterials(v);v.pending.awaiting_upload=false;v.pending.body.selected_paper_ids=v.paperIds.slice();v.pending.body.expected_revision=v.material.workspace.revision;pendingSave(v);await postMessage(v,v.pending.body,false,composeVersion);return;}
                 await settings(v,true);
                 await uploadSelected(v);await refreshMaterials(v);
                 const body={request_id:"message-"+uid(),content:text,selected_item_id:v.selectedItemId || null,selected_paper_ids:v.paperIds.slice(),expected_revision:v.material.workspace.revision,...(v.planRequest ? {plan_request:v.planRequest} : {})};
                 v.planRequest=null;v.r.planPending.textContent="";
                 v.pending={body};pendingSave(v);
                 merge(v,[{message_id:"pending:"+body.request_id,request_id:body.request_id,role:"user",content:text,optimistic:true,request_status:"processing"}]);
-                if(current(v)){if(v.r.input.value.trim()===text)v.r.input.value="";saveDraft(v);paintMessages(v,{force:true});}
-                await postMessage(v,body);
+                if(current(v)){saveDraft(v);paintMessages(v,{force:true});}
+                await postMessage(v,body,false,composeVersion);
             }
         }catch(e){
             v.startPending=!v.cid && !!store.get("sra.ch.start."+scope(v.pid,null));
@@ -763,7 +1079,16 @@
         finally{v.busy=false;paintHeader(v);}
     }
     async function retry(v,rid){if(v.busy || v.remoteBusy)return;await postMessage(v,{request_id:rid},true);}
-    async function resend(v){if(v.busy || v.remoteBusy || !v.pending)return;if(v.pending.awaiting_upload){await firstSend(v,v.pending.body.content);return;}await postMessage(v,v.pending.body);}
+    async function restartRound(v,rid){
+        if(v.busy || v.remoteBusy)return;
+        if(!window.confirm("重新发起本次生成会再次调用模型，可能产生费用。原失败记录和正式材料会保留；新内容只作为待审阅草案。是否继续？"))return;
+        v.busy=true;paintHeader(v);
+        try{const data=await request(path(v,`/requests/${encodeURIComponent(rid)}/restart`),{method:"POST",body:{acknowledge_model_cost:true,wait_for_completion:false}});
+            if(!current(v))return;applyResponse(v,data);await checkRequest(v,rid,true);if(data.status==="completed"){await newMessages(v);await refreshMaterials(v);}
+        }catch(e){if(current(v)){await checkRequest(v,rid,true);const child=v.requests[rid]?.recovery_request_id;if(child)await checkRequest(v,child,true);else fail(v,e);}}
+        finally{v.busy=false;if(current(v)){paintHeader(v);paintMessages(v);schedule(v);}}
+    }
+    async function resend(v){if(v.busy || v.remoteBusy || !v.pending)return;if(v.pending.awaiting_upload){await firstSend(v,v.pending.body.content);return;}await resumePending(v);}
     function panel(v,open,{refresh=true,restore=true}={}){
         if(!current(v))return;
         const wasOpen=!v.r.panel.hidden,center=v.root.querySelector('.ch-center');
@@ -776,7 +1101,7 @@
         }
     }
     function visibleContent(v,content){for(const p of v.material?.papers || [])content=content.split(p.paper_id).join(`${p.authors?.[0] || p.title}（${p.year || '年份待核对'}）`);for(const item of v.material?.workspace?.items || [])content=content.split(item.item_id).join(item.title);return content.replace(/参考论文 ID：/g,"参考资料：");}
-    async function openMaterial(v,kind,id){
+    async function openMaterial(v,kind,id,version=null){
         if(!current(v))return;
         try{
         if(kind==='proposal'||kind==='plan')v.r.materialBody.querySelectorAll('.ch-plan-review').forEach(n=>n.open=false);
@@ -784,7 +1109,7 @@
         const savedId=kind==="proposal" ? v.suggestions.find(s=>s.suggestion_id===id)?.applied_item_id : null;
         const suggestion=kind==='proposal'?v.suggestions.find(s=>s.suggestion_id===id):null;
         selectMaterialTab(v,['plan','record'].includes(kind)||kind==='proposal'&&suggestion?.kind==='plan'?'plans':['papers','report'].includes(kind)?'papers':'overview');
-        if(kind==='report'){await loadMaterialReports(v,{id});return;}
+        if(kind==='report'){await loadMaterialReports(v,{id,version});return;}
         if(kind==='record'){
             const item=v.material.workspace.items.find(i=>i.item_id===id&&i.kind==='plan');if(!item)throw new Error('所选方案不存在或不属于当前项目');
             let target=v.r.materialBody.querySelector(`[data-plan-id="${CSS.escape(id)}"]`);if(target){target.closest('[data-material-kind="history"]')?.setAttribute('open','');target.open=true;target.scrollIntoView({block:'start'});}return;
@@ -860,7 +1185,7 @@
             if(["completed","partial"].includes(t.status))controls.append(button("下载整理报告",()=>{window.open(BASE+`/api/projects/${encodeURIComponent(v.pid)}/research-tasks/${encodeURIComponent(t.task_id)}/export`,"_blank");},"ch-text-button"));
             for(const ver of versions.slice(0,-1))controls.append(button(`下载 v${ver.version}`,()=>{window.open(BASE+`/api/projects/${encodeURIComponent(v.pid)}/research-tasks/${encodeURIComponent(t.task_id)}/export?version=${ver.version}`,"_blank");},"ch-text-button"));
             body.append(E("p","muted small","候选、入库和纳入综合含义不同；正式问题和方案仍需你确认。"));
-            const compact=E('p','ch-task-compact',(['completed','partial'].includes(t.status)?`已保存 ${t.saved_papers_count ?? 0} 篇资料；纳入 ${t.included_count ?? 0}，筛选排除 ${t.excluded_count ?? 0}。`:t.status==='failed'?'整理未完成；已保存资料保留，可查看原因后重试。':({planning:'正在规划查询',searching:'正在请求文献来源',ranking:'正在筛选候选',saving:'正在保存资料',synthesizing:'正在整理研究现状',delivering:'正在保存报告'})[t.stage] || t.status_label));
+            const compact=E('p','ch-task-compact',t.cancel_note || (['completed','partial'].includes(t.status)?`已保存 ${t.saved_papers_count ?? 0} 篇资料；纳入 ${t.included_count ?? 0}，筛选排除 ${t.excluded_count ?? 0}。`:t.status==='failed'?'整理未完成；已保存资料保留，可查看原因后重试。':({planning:'正在规划查询',searching:'正在请求文献来源',ranking:'正在筛选候选',saving:'正在保存资料',synthesizing:'正在整理研究现状',delivering:'正在保存报告'})[t.stage] || t.status_label));
             card.append(compact,controls,body);
             const user=v.r.messages.querySelector(`[data-request-id="${CSS.escape(t.request_id || '')}"]`);
             // Completed tasks must remain discoverable even when their original
@@ -906,8 +1231,13 @@
         v.root.append(dialog);dialog.showModal();topic.focus();
     }
     async function submitTask(v,body){
+        const key='sra.ch.task-pending.'+scope(v.pid,v.cid),prior=store.get(key);
+        const identity=value=>JSON.stringify(Object.fromEntries(Object.entries(value).filter(([k])=>k!=='request_id')));
+        if(prior && identity(prior)===identity(body))body=prior;
+        store.set(key,body);
         try{
             const result=await request(path(v,"/research-tasks"),{method:"POST",body});
+            store.remove(key);
             if(!current(v))return;
             registerTask(v,result.task);
             await refreshMaterials(v).catch(()=>{});
@@ -918,13 +1248,18 @@
         const root=E("section","conversation-home");root.setAttribute("aria-label","中央科研对话");
         root.innerHTML=`<div class="ch-shell"><div class="ch-center">
           <header class="ch-heading"><div><div class="ch-project-line"><button type="button" class="ch-text-button" data-ref="project" aria-label="查看所属项目">开始新研究</button></div><h1 data-ref="title" tabindex="0">新对话</h1><button type="button" data-ref="progress" class="ch-stage ch-text-button">明确条件</button></div><div class="ch-heading-actions"><button class="btn btn-secondary" type="button" data-ref="panelToggle" aria-expanded="false">研究材料</button><details class="ch-title-menu"><summary aria-label="项目与对话操作">⋯</summary><div><button type="button" data-ref="renameProject" class="ch-text-button" hidden>修改项目名</button><button class="ch-text-button" type="button" data-ref="rename" hidden>重命名对话</button><button class="ch-text-button" type="button" data-ref="identity">查看与复制项目编号</button><button type="button" data-ref="relationship" class="ch-text-button">项目与对话有什么不同？</button><small data-ref="fullName" hidden></small></div></details></div></header>
-          <div data-ref="welcome" class="ch-welcome"><span class="ch-eyebrow">SCIENTIFIC RESEARCH · HUMAN + AGENT</span><h2>从一个兴趣，到一份清晰的研究方案</h2><p>你好，我会和你一起把研究兴趣整理成清晰的问题，再形成有文献依据的研究方案。<br>你可以从零开始，也可以带着已有方向、论文或想法继续。</p><div class="ch-openers"><button type="button" data-entry="0">第一次做研究，带我入门。<span>从兴趣和当前条件出发</span></button><button type="button" data-entry="1">我有方向，想了解研究现状。<span>梳理文献，明确已有工作</span></button><button type="button" data-entry="2">我有研究问题，想设计或完善方案。<span>讨论对照、指标与可行性</span></button></div><small>案例体验尚未接入。本轮不执行实验，也不生成论文或科研结论。</small></div>
+          <div data-ref="welcome" class="ch-welcome"></div>
           <div class="ch-history-tools"><button type="button" class="ch-text-button" data-ref="earlier" hidden>加载更早消息</button><button type="button" class="ch-text-button" data-ref="latest" hidden>查看最新消息 ↓</button><span data-ref="loading" role="status">正在核对会话能力…</span></div>
           <div class="ch-messages" data-ref="messages" role="log" aria-label="当前会话消息" aria-live="polite" tabindex="0"></div>
           <form data-ref="form" class="ch-compose"><div class="ch-error" data-ref="error" role="status" hidden></div><label class="rg-sr-only" for="ch-input">向科研指导提问</label><textarea id="ch-input" data-ref="input" rows="2" maxlength="6000" placeholder="说说你的研究兴趣、已有想法，或当前遇到的问题…"></textarea><div class="ch-compose-footer"><div class="ch-compose-tools"><button type="button" class="ch-text-button" data-ref="import" title="导入／查看论文">＋ 资料</button><details class="ch-settings"><summary>讨论设置</summary><div class="ch-settings-grid"><label><span data-ref="belongsLabel">首次发送后归入</span><select data-ref="belongs" aria-label="对话归属"><option value="">＋ 开始新研究</option></select></label><label data-ref="domainWrap">研究领域<select data-ref="domain" aria-label="研究领域"><option value="">尚未确定 · 请确认</option></select></label><label>指导方式<select data-ref="mode" aria-label="指导方式"><option value="beginner">带我入门</option><option value="direct">直接处理问题</option><option value="case" disabled>教学设置（案例内固定）</option></select></label><label>进入阶段<select data-ref="stage" aria-label="进入阶段"><option value="orientation">明确条件</option><option value="literature">了解研究现状</option><option value="question">确认研究问题</option><option value="design">形成并审阅方案</option></select></label><label class="ch-goal">讨论目标<input data-ref="goal" aria-label="讨论目标" maxlength="2000" placeholder="例如：明确研究问题的范围" /></label><p class="muted small">设置不改变正式研究主线。新研究的领域需由你确认。</p><button type="button" class="btn btn-secondary" data-ref="saveSettings">保存讨论设置</button></div></details></div><span data-ref="composeScope" class="ch-compose-scope"></span><button type="submit" class="btn" data-ref="send" disabled>发送</button></div></form>
         </div><aside data-ref="panel" class="ch-material-panel" aria-label="当前项目研究材料" hidden><div class="ch-panel-header"><h2>研究材料</h2><button type="button" data-ref="panelWide" class="btn btn-secondary">扩大阅读</button><button type="button" data-ref="panelClose" class="btn btn-secondary">返回对话</button><div class="ch-material-tabs" data-ref="materialTabs" role="tablist" aria-label="研究材料分类"></div></div><div class="ch-material-scroll" data-ref="materialScroll" tabindex="0"><div data-ref="researchSummary" class="ch-overview" data-material-group="overview"><h3>研究概况</h3><p data-ref="confirmedQuestion"></p><p data-ref="confirmedBrief"></p><p data-ref="summaryHint"></p><button type="button" class="ch-text-button" data-ref="pendingItems">查看待确认事项</button><details class="ch-overview-stages"><summary>四阶段与正式材料状态</summary><ol data-ref="stageList"><li></li><li></li><li></li><li></li></ol><p>当前阶段来自已保存材料；讨论入口不代表前面步骤已完成。流程止于研究方案，不执行实验。</p></details></div><div data-ref="materialBody"></div><button type="button" class="ch-text-button" data-ref="refresh">刷新材料与草案</button></div></aside></div>`;
         const actions=root.querySelector('.ch-heading-actions');
-        root.querySelector('.ch-welcome p').after(E('p','ch-first-send-note','直接输入或先选论文，首次发送后才建立独立项目。'));
+        root.querySelector('.ch-welcome').append($('ch-home-introduction').content.cloneNode(true));
+        root.querySelector('.ch-home-flow').open=window.innerWidth>900;
+        root.querySelector('.ch-welcome p').after(E('p','ch-first-send-note','可以直接输入、先添加论文，或选择已有项目。明确发送后才建立项目或新会话。'));
+        const belongsNote=E('p','muted small');belongsNote.dataset.ref='belongsNote';root.querySelector('.ch-settings-grid').append(belongsNote);
+        root.querySelector('[data-home-action="upload"]').onclick=()=>g.v?.r.import.click();
+        root.querySelector('[data-home-action="projects"]').onclick=()=>g.app.navigate({page:'create'});
         const planTools=E("details","ch-plan-tools");planTools.dataset.ref="planTools";planTools.hidden=true;
         planTools.innerHTML='<summary>方案生成与审阅</summary><label>研究问题<select data-ref="planQuestion" aria-label="方案关联问题"></select></label><label>研究方法<select data-ref="planMethod" aria-label="方案研究方法"><option value="">尚未确定（先澄清）</option><option value="computational">计算研究</option><option value="theoretical">理论研究</option><option value="experimental">实验研究设计（仅规划）</option></select></label><p class="muted small">领域不决定方法。此处只准备可编辑请求，发送后才生成草案，不执行实验。</p><button type="button" class="btn btn-secondary" data-ref="preparePlan">准备生成方案请求</button><button type="button" class="ch-text-button" data-ref="cancelPlan">取消方案请求</button><p role="status" data-ref="planPending"></p>';
         root.querySelector('.ch-settings').after(planTools);
@@ -945,25 +1280,33 @@
         summary.append(E("h2","","继续这个项目"),summaryText,button("在本项目新建对话",()=>{root.querySelector('[data-ref="input"]').focus();}),button("查看文献与资料",()=>openMaterial(g.v,'papers')),projectConversations);
         root.querySelector('.ch-welcome').before(summary);
         const handoff=E('section','ch-project-summary');handoff.dataset.ref='handoff';handoff.hidden=true;root.querySelector('.ch-history-tools').before(handoff);
+        const moveButton=button('移动到项目',null,'ch-text-button');moveButton.dataset.ref='move';moveButton.hidden=true;root.querySelector('.ch-title-menu>div').append(moveButton);
+        const moveHistory=E('p','ch-move-history');moveHistory.dataset.ref='moveHistory';moveHistory.hidden=true;root.querySelector('.ch-heading').after(moveHistory);
+        const backgroundScope=E('details','ch-background-scope');backgroundScope.dataset.ref='backgroundScope';backgroundScope.hidden=true;
+        backgroundScope.append(E('summary','','本次讨论的背景与资料范围'),E('p','','本次讨论可参考已保存的项目背景和实际读取的项目材料。'),E('p','small','项目背景是你明确保存的四项信息；已采纳研究问题和正式方案仍引用原记录。入库资料不代表已完整阅读，实际使用范围以本次摘要或片段为准。当前对话的新说法只用于讨论，长期使用请明确编辑保存；不会拼接其他对话的完整正文。'),button('查看项目背景',()=>{if(g.v?.root===root)openMaterial(g.v,'background');},'ch-text-button'));
+        root.querySelector('[data-ref=form]').before(backgroundScope);
         const filePending=E('div','ch-file-pending');filePending.dataset.ref='filePending';filePending.setAttribute('role','status');root.querySelector('.ch-compose-footer').before(filePending);
         host.append(root);
         const r=Object.fromEntries([...root.querySelectorAll("[data-ref]")].map(n=>[n.dataset.ref,n]));
-        const v=g.v={root,r,pid:projectId,cid:conversationId,meta:null,material:null,messages:[],requests:{},paperIds:[],suggestions:[],suggestionOffset:null,before:null,reads:new AbortController(),busy:false,remoteBusy:false,writable:false,accepted:new Set(),tasks:{},taskTimer:null};
+        const v=g.v={root,r,inputVersion:0,pid:projectId,cid:conversationId,meta:null,material:null,messages:[],requests:{},paperIds:[],suggestions:[],suggestionOffset:null,before:null,reads:new AbortController(),busy:false,remoteBusy:false,writable:false,accepted:new Set(),tasks:{},taskTimer:null};
+        r.move.onclick=()=>openMove(v.pid,v.cid,v.meta?.title||'当前对话');
         window.SRA_TEACHING?.attach({v,E,button,current,request,app:g.app,refreshMessages:()=>pageMessages(v,{replace:true}),refreshMaterials:()=>refreshMaterials(v),repaint:()=>paintMessages(v),openMaterial:(kind,id)=>openMaterial(v,kind,id),adopt:sid=>adopt(v,sid),closeMaterials:()=>panel(v,false),notice,fail});
         const taskBox=E("div","ch-task-box");taskBox.dataset.ref="taskBox";taskBox.hidden=true;taskBox.setAttribute("role","status");taskBox.setAttribute("aria-label","文献检索任务");r.messages.append(taskBox);r.taskBox=taskBox;
-        const draft=store.get(draftKey(v),{});v.domainConfirmed=draft.domainConfirmed===true;v.selectedItemId=draft.selectedItemId || null;v.planRequest=draft.planRequest || null;r.planMethod.value=draft.planMethod || "";r.input.value=draft.text || "";setSettings(v,draft.settings || {});v.startPending=!v.cid && !!store.get("sra.ch.start."+scope(v.pid,null));
+        const draft=store.get(draftKey(v),{});v.domainConfirmed=draft.domainConfirmed===true;v.selectedItemId=draft.selectedItemId || null;v.paperIds=Array.isArray(draft.paperIds)?draft.paperIds.filter(id=>typeof id==='string').slice(0,3):[];v.planRequest=draft.planRequest || null;r.planMethod.value=draft.planMethod || "";r.input.value=draft.text || "";setSettings(v,draft.settings || {});v.startPending=!v.cid && !!store.get("sra.ch.start."+scope(v.pid,null));
         r.preparePlan.onclick=()=>preparePlanInput(v,"请为所选研究问题生成一份研究方案，具体要求：",{method:r.planMethod.value || null,question_id:r.planQuestion.value || null,supersedes_id:v.planRequest?.supersedes_id || null});
         if(v.planRequest)r.planPending.textContent="已恢复待发送的方案请求；尚未调用模型，可继续编辑。";
         r.planMethod.onchange=()=>{if(v.planRequest)v.planRequest.method=r.planMethod.value || null;saveDraft(v);};r.cancelPlan.onclick=()=>{v.planRequest=null;r.planPending.textContent="已清除附加的类型和修订信息，草稿保留；如果文字仍要求生成方案，请先修改文字再发送。";saveDraft(v);};
+        const resourceHint=E('p','muted small');resourceHint.setAttribute('role','status');
+        r.form.append(resourceHint);window.SRA_RESOURCES?.hint(resourceHint);
         r.form.onsubmit=e=>{e.preventDefault();const text=r.input.value.trim();if(v.startPending || v.pending?.awaiting_upload || text || store.get(fileKey(v)) || g.files.has(scope(v.pid,v.cid)))firstSend(v,text || '请根据我提供的论文资料，先帮助我理解研究内容与可讨论的问题；不自动确认问题或生成方案。');};
         const fitInput=()=>{r.input.style.height='auto';r.input.style.height=Math.min(r.input.scrollHeight,window.innerWidth<=700?112:170)+'px';};
-        r.input.oninput=()=>{fitInput();saveDraft(v);};fitInput();
+        r.input.oninput=()=>{v.inputVersion++;fitInput();saveDraft(v);};fitInput();
         let composing=false;r.input.addEventListener("compositionstart",()=>{composing=true;});r.input.addEventListener("compositionend",()=>{composing=false;});
         r.input.onkeydown=e=>{if((e.ctrlKey || e.metaKey) && e.key==="Enter" && !e.isComposing && !composing && e.keyCode!==229){e.preventDefault();r.form.requestSubmit();}};
         root.querySelectorAll("[data-entry]").forEach(b=>b.onclick=()=>{const n=Number(b.dataset.entry),text=["这是我第一次做研究，我感兴趣的方向是：","我想了解这个研究方向的现状：","我目前的研究问题是：\n想请你帮我设计或完善方案。"][n];if(r.input.value.trim()&&r.input.value.trim()!==text&&!window.confirm('输入框已有草稿，是否保留并追加这段开场提示？'))return;r.mode.value=n===0 ? "beginner" : "direct";r.stage.value=["orientation","literature","design"][n];r.input.value=r.input.value.trim()&&r.input.value.trim()!==text?r.input.value+'\n\n'+text:text;saveDraft(v);r.input.focus();});
         for(const input of [r.mode,r.stage,r.goal])input.addEventListener("input",()=>saveDraft(v));
         r.domain.onchange=()=>{v.domainConfirmed=!!r.domain.value;saveDraft(v);paintHeader(v);};
-        r.belongs.onchange=()=>{if(r.belongs.value==="__more__"){r.belongs.value=v.pid || "";g.app.navigate({page:"create"});}else g.app.navigate({projectId:r.belongs.value || null,conversationId:null,page:"dashboard"});};
+        r.belongs.onchange=()=>{if(v.cid||v.startPending||v.pending)return;if(r.belongs.value==="__more__"){r.belongs.value=v.pid || "";g.app.navigate({page:"create"});}else g.app.navigate({projectId:r.belongs.value || null,conversationId:null,page:"dashboard"});};
         r.saveSettings.onclick=()=>v.cid ? settings(v).catch(e=>fail(v,e)) : notice(v,"设置已留在当前草稿，首次发送时才创建会话并保存。");
         r.import.setAttribute('aria-label','导入／查看论文');r.import.onclick=()=>{if(!v.pid){chooseFile(v);return;}if(v.material?.teaching){openMaterial(v,'papers');return;}const d=E('dialog','case-dialog');d.append(E('h3','','当前项目资料'),button('添加待上传论文',()=>{d.close();d.remove();chooseFile(v);}),button('查看已有资料',()=>{d.close();d.remove();openMaterial(v,'papers');}),button('取消',()=>{d.close();d.remove();}));v.root.append(d);d.showModal();};r.rename.onclick=()=>renameConversation(v.pid,v.cid,v.meta.title);
         r.renameProject.onclick=()=>renameProject(v.pid,projectName(v.pid));r.pendingItems.onclick=()=>g.app.navigate({page:'human'});
@@ -992,18 +1335,19 @@
                 if(v.cid && g.cap?.research_search && !v.material?.teaching){try{const list=await request(path(v,"/research-tasks")+"?limit=10",{signal:v.reads.signal});if(current(v)){for(const t of list.tasks)v.tasks[t.task_id]={...v.tasks[t.task_id],...t};paintTasks(v);for(const t of list.tasks)pollTask(v,t.task_id);}}catch(e){if(e.name!=="AbortError" && current(v))notice(v,"检索任务状态暂时无法读取："+e.message);}}
                 paintHeader(v);paintMessages(v,{initial:true});schedule(v);
                 if(g.pendingRead?.pid===v.pid){const target=g.pendingRead;g.pendingRead=null;await openMaterial(v,target.suggestionId?'proposal':'record',target.suggestionId || target.itemId);}
-            }catch(e){if(e.name!=="AbortError"){r.loading.textContent="读取失败";fail(v,e);r.error.append(button("重新核对接口与材料",()=>g.app.navigate({...g.app.getRoute(),replace:true})));}}
+            }catch(e){if(e.name!=="AbortError"){r.loading.textContent=e.data?.detail?.code==='conversation_moved'?'对话已移动':'读取失败';fail(v,e);if(e.data?.detail?.code!=='conversation_moved')r.error.append(button("重新核对接口与材料",()=>g.app.navigate({...g.app.getRoute(),replace:true})));}}
         })();
     }
     function init(app){g.app=app;
+        const expanded=store.get('sra.ch.expandedFolders',[]);g.expandedFolders=new Set(Array.isArray(expanded)?expanded.filter(pid=>typeof pid==='string').slice(-30):[]);
         document.querySelectorAll("#nav .nav-item").forEach(n=>{n.tabIndex=0;n.setAttribute("role","button");n.onkeydown=e=>{if(e.key==="Enter" || e.key===" "){e.preventDefault();n.click();}};});
         $("ch-new").onclick=()=>app.navigate({projectId:null,conversationId:null,page:"dashboard"});
         $('ch-project-new').onclick=()=>{const route=app.getRoute();if(!route.projectId)return;app.navigate({projectId:route.projectId,conversationId:null,page:'dashboard'});};
-        $('ch-current-project').onclick=()=>app.navigate({projectId:app.getRoute().projectId,conversationId:null,page:'dashboard'});
+        $('ch-current-project').onclick=()=>{if(app.getRoute().projectId)app.navigate({page:'project-overview'});};
         $('ch-sidebar-help').onclick=()=>$('topbar-help').click();
         document.querySelectorAll('.ch-current-materials .nav-item').forEach(n=>n.addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&n.getAttribute('aria-disabled')!=='true'){e.preventDefault();n.click();}}));
         $('ch-conversation-collapse').onclick=()=>{g.recentWindow=5;recentConversations();};
-        const toggleSide=()=>{if(innerWidth<=900){const open=document.body.classList.toggle('ch-nav-open');$('ch-menu').setAttribute('aria-expanded',String(open));}else {const collapsed=document.body.classList.toggle('ui-sidebar-collapsed');store.set('sra.ch.sidebarCollapsed',collapsed);$('ch-menu').setAttribute('aria-expanded',String(!collapsed));}};
+        const toggleSide=()=>{if(innerWidth<=900){const open=document.body.classList.toggle('ch-nav-open');$('ch-menu').setAttribute('aria-expanded',String(open));if(open){g.revealedFolderConversation=null;paintProjects();}}else {const collapsed=document.body.classList.toggle('ui-sidebar-collapsed');store.set('sra.ch.sidebarCollapsed',collapsed);$('ch-menu').setAttribute('aria-expanded',String(!collapsed));}};
         document.body.classList.toggle('ui-sidebar-collapsed',store.get('sra.ch.sidebarCollapsed',false));
         $('ch-sidebar-collapse').onclick=toggleSide;
         let searchTimer;$("ch-project-search").oninput=()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>projects(),180);};
@@ -1015,8 +1359,8 @@
         for(const [id,body] of [['ch-recent-group','ch-recent-body'],['ch-project-group','ch-project-body']]){const control=$(id),region=$(body);region.hidden=store.get('sra.ch.collapsed.'+id,false);control.setAttribute('aria-expanded',String(!region.hidden));control.onclick=()=>{region.hidden=!region.hidden;control.setAttribute('aria-expanded',String(!region.hidden));store.set('sra.ch.collapsed.'+id,region.hidden);};}
         document.addEventListener('click',e=>{const summary=e.target.closest('summary'),popup=summary?.parentElement?.matches(popupSelector)?summary.parentElement:null;if(popup){closePopups(popup);if(g.v&&!g.v.r.panel.hidden&&innerWidth<=900)panel(g.v,false,{restore:false});return;}document.querySelectorAll(popupSelector).forEach(n=>{if(n.open && (!n.contains(e.target)||e.target.closest('button,a')))n.open=false;});const v=g.v;if(v&&!v.r.downloadPanel.hidden&&!v.r.downloadPanel.contains(e.target)&&!v.r.downloadToggle.contains(e.target)){v.r.downloadPanel.hidden=true;v.r.downloadToggle.setAttribute('aria-expanded','false');}},true);
         document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!document.querySelector('dialog[open]')){const opened=!!document.querySelector(popupSelector.split(',').map(s=>s+'[open]').join(',')) || g.v&&!g.v.r.downloadPanel.hidden;if(opened)closePopups(null,{focus:true});else if(g.v&&!g.v.r.panel.hidden)panel(g.v,false);document.body.classList.remove('ch-nav-open');$('ch-menu').setAttribute('aria-expanded',String(innerWidth>900&&!document.body.classList.contains('ui-sidebar-collapsed')));}});
-        window.addEventListener("sra:projects-changed",()=>{projects();recentConversations();});
-        window.addEventListener("sra:context",()=>{navigationContext();projects();recentConversations();if(g.app.getRoute().projectId!==g.sidePid)conversations(g.app.getRoute().projectId);});
+        window.addEventListener("sra:projects-changed",()=>{g.folders.clear();projects();recentConversations();});
+        window.addEventListener("sra:context",()=>{if(!g.app.getRoute().conversationId)g.revealedFolderConversation=null;navigationContext();paintProjects();projects();recentConversations();if(g.app.getRoute().projectId!==g.sidePid)conversations(g.app.getRoute().projectId);});
         window.addEventListener("focus",()=>{const v=g.v;if(v?.pid)refreshMaterials(v).catch(e=>{if(e.name!=="AbortError")fail(v,e);});});
         window.addEventListener("sra:discuss",e=>{const route=app.getRoute();if(e.detail.projectId!==route.projectId)return;const key="sra.ch.draft."+scope(route.projectId,route.conversationId),draft=store.get(key,{});if(!draft.text?.trim())draft.text=e.detail.message || "";draft.selectedItemId=e.detail.itemId || null;store.set(key,draft);app.navigate({page:"dashboard"});});
         projects();

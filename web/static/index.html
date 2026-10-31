@@ -11,13 +11,43 @@
     <link rel="stylesheet" href="/static/ui-experience.css" />
 </head>
 <body>
-<div class="app">
+<div id="account-gate" class="account-gate" role="main">
+    <form id="account-form" class="account-card">
+        <h1 id="account-title">科研 Agent</h1>
+        <p id="account-subtitle">登录后继续你的研究工作台</p>
+        <label>邮箱<input name="email" type="email" autocomplete="username" required maxlength="254"></label>
+        <div class="account-password-field">
+            <label for="account-password">密码</label>
+            <div class="account-password-control">
+                <input id="account-password" name="password" type="password" autocomplete="current-password" aria-describedby="account-password-help" required maxlength="256">
+                <button class="account-password-toggle" type="button" data-password-toggle="account-password" data-password-name="密码" aria-controls="account-password" aria-label="显示密码" aria-pressed="false" title="显示密码">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="password-eye-slash" d="m3 3 18 18"/></svg>
+                </button>
+            </div>
+        </div>
+        <div id="account-confirm-row" class="account-password-field" hidden>
+            <label for="account-confirm-password">确认密码</label>
+            <div class="account-password-control">
+                <input id="account-confirm-password" name="confirm_password" type="password" autocomplete="new-password" aria-describedby="account-password-help" minlength="8" maxlength="256" disabled>
+                <button class="account-password-toggle" type="button" data-password-toggle="account-confirm-password" data-password-name="确认密码" aria-controls="account-confirm-password" aria-label="显示确认密码" aria-pressed="false" title="显示确认密码">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="password-eye-slash" d="m3 3 18 18"/></svg>
+                </button>
+            </div>
+        </div>
+        <p id="account-password-help" class="account-help"><strong>密码要求</strong><br>长度为 8–256 个字符，支持大小写字母、数字和特殊符号。<br>建议组合使用，避免常见、已泄露或在其他网站重复使用的密码。<br>部分常见弱密码及全部由相同字符组成的密码无法注册。</p>
+        <button id="account-submit" type="submit">登录</button>
+        <button id="account-switch" class="account-switch" type="button" hidden>注册新账号</button>
+        <p id="account-message" role="status">正在核对登录状态…</p>
+    </form>
+</div>
+<div class="app" hidden>
     <!-- 左侧导航 -->
     <aside class="sidebar">
         <div class="sidebar-header">
             <h1 class="sidebar-title">科研 Agent 系统</h1>
             <button type="button" id="ch-sidebar-collapse" class="ch-sidebar-toggle" aria-label="收起侧栏" title="收起侧栏">◧</button>
             <div class="sidebar-subtitle">Scientific Research Assistant</div>
+            <div id="account-controls" hidden><span id="account-email"></span><button type="button" id="account-logout">退出</button></div>
         </div>
         <nav class="nav" id="nav">
             <button type="button" class="nav-new" id="ch-new">＋ 新研究</button>
@@ -202,19 +232,49 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="/static/vendor/marked/marked.min.js"></script>
-<script src="/static/vendor/dompurify/purify.min.js"></script>
-<script src="/static/research-document.js"></script>
-<script src="/static/vendor/mathjax/tex-svg-full.js"></script>
-<script src="/static/research-navigation.js"></script>
-<script src="/static/research-flow.js"></script>
-<script src="/static/project-management.js"></script>
-<script src="/static/conversation-home.js"></script>
+<template id="ch-home-introduction">
+    <span class="ch-eyebrow">SCIENTIFIC RESEARCH · HUMAN + AGENT</span>
+    <h2>从一个科研兴趣，逐步形成有依据的研究问题与方法草案。</h2>
+    <p class="ch-home-position">面向科研新手，围绕研究问题组织讨论，让资料、判断依据和方法草案逐步积累在同一个项目中。</p>
+    <details class="ch-home-flow">
+        <summary>研究引导：六步可往返，从适合你的地方开始</summary>
+        <ol class="ch-home-steps">
+            <li><strong>说说兴趣与条件</strong><p>通过对话了解方向、已有基础、时间和资源。不知道具体题目也可以开始。</p></li>
+            <li><strong>逐步明确研究方向</strong><p>结合你的回答缩小范围，确定值得进一步了解的问题。</p></li>
+            <li><strong>导入或检索文献</strong><p>整理相关资料，区分标题、摘要和正文。联网检索需明确发起，受当前服务配置、额度和来源可用性限制。</p></li>
+            <li><strong>结合资料讨论</strong><p>讨论研究做了什么、依据与限制，整理值得追问的问题；以实际读取内容为准。</p></li>
+            <li><strong>确认研究问题与创新点候选</strong><p>区分文献支持的内容与待验证设想，由你决定是否采用；不保证候选具有创新性。</p></li>
+            <li><strong>形成方法草案</strong><p>讨论步骤、资源、比较方式和可行性，审阅后明确采纳。</p></li>
+        </ol>
+        <p class="ch-home-flow-note">这些步骤可以往返，不必逐项完成。已有方向或已有论文，都可以从对应入口开始。</p>
+    </details>
+    <p class="ch-home-relationship">项目像一个持续研究课题的资料文件夹，集中保存文献、笔记、已确认的研究问题和正式方案。一个项目可以开启多段独立对话，分别讨论不同问题。后续讨论可以参考已保存的项目信息，具体使用范围以实际读取内容为准。</p>
+    <div class="ch-openers">
+        <button type="button" data-entry="0">第一次做研究，带我入门。<span>只填入开场文字；发送后讨论兴趣与条件，逐步整理可选方向。</span></button>
+        <button type="button" data-entry="1">我有方向，想了解研究现状。<span>只填入开场文字；发送后讨论方向与资料需求，不会直接检索。</span></button>
+        <button type="button" data-entry="2">我有研究问题，想设计或完善方案。<span>只填入开场文字；发送后核对问题与方法，满足依据条件后才可生成待审阅草案。</span></button>
+    </div>
+    <div class="ch-home-starts"><button type="button" class="ch-text-button" data-home-action="upload">我已有论文，先添加资料</button><button type="button" class="ch-text-button" data-home-action="projects">选择已有项目</button></div>
+    <small>研究引导止于方案设计，不执行实验、训练或论文生成，也不保证创新成立。</small>
+</template>
+
 <link rel="stylesheet" href="/static/teaching-cases.css">
-<script src="/static/teaching-cases.js"></script>
-<script src="/static/project-library.js"></script>
-<script src="/static/workspace-overview.js"></script>
-<script src="/static/research-guide.js"></script>
-<script src="/static/app.js"></script>
+<!-- Inert manifest: local-auth loads these in order after resolving identity. -->
+<script type="text/plain" data-account-script src="/static/vendor/marked/marked.min.js"></script>
+<script type="text/plain" data-account-script src="/static/vendor/dompurify/purify.min.js"></script>
+<script type="text/plain" data-account-script src="/static/research-document.js"></script>
+<script type="text/plain" data-account-script src="/static/resource-protection.js"></script>
+<script type="text/plain" data-account-script src="/static/vendor/mathjax/tex-svg-full.js"></script>
+<script type="text/plain" data-account-script src="/static/research-navigation.js"></script>
+<script type="text/plain" data-account-script src="/static/research-flow.js"></script>
+<script type="text/plain" data-account-script src="/static/project-management.js"></script>
+<script type="text/plain" data-account-script src="/static/project-background.js"></script>
+<script type="text/plain" data-account-script src="/static/conversation-home.js"></script>
+<script type="text/plain" data-account-script src="/static/teaching-cases.js"></script>
+<script type="text/plain" data-account-script src="/static/project-library.js"></script>
+<script type="text/plain" data-account-script src="/static/workspace-overview.js"></script>
+<script type="text/plain" data-account-script src="/static/research-guide.js"></script>
+<script type="text/plain" data-account-script src="/static/app.js"></script>
+<script src="/static/local-auth.js"></script>
 </body>
 </html>

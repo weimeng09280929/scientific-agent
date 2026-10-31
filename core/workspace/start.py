@@ -54,13 +54,14 @@ class StartConversation(Contract):
 
 
 class ConversationStarter:
-    def __init__(self, paths, require_project, register_project):
+    def __init__(self, paths, require_project, register_project, owner_id=None):
         self.paths, self.require_project, self.register_project = (
             paths,
             require_project,
             register_project,
         )
         self.db = paths.projects / ".conversation-starts.db"
+        self.owner_id = owner_id
 
     @contextmanager
     def transaction(self):
@@ -160,6 +161,13 @@ class ConversationStarter:
                 )
 
     def start(self, request: StartConversation):
+        public_request_id = request.request_id
+        if self.owner_id:
+            # The durable reservation, project UUID and bootstrap marker must all
+            # use the same user-scoped identity. Never trust an owner from JSON.
+            request = request.model_copy(update={
+                "request_id": "u:" + uuid5(NAMESPACE_URL, self.owner_id + ":" + public_request_id).hex
+            })
         identity = request.model_dump(exclude={"request_id"})
         if identity.get("discussion_step") is None:
             identity.pop("discussion_step", None)
@@ -282,7 +290,7 @@ class ConversationStarter:
                         (conversation["conversation_id"], request.request_id),
                     )
             return {
-                "request_id": request.request_id,
+                "request_id": public_request_id,
                 "project_id": row["project_id"],
                 "conversation_id": conversation["conversation_id"],
                 "conversation": conversation,

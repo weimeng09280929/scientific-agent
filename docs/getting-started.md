@@ -6,7 +6,7 @@
 
 [人工安装](#方式一自己安装) · [Agent 辅助安装](#方式二交给编程-agent-安装) · [数据与更新](#数据保存更新与服务器运行) · [安装后自查](#安装后自查)
 
-准备 **Git、Python 3.10 或以上版本**，以及一个你有权使用、且余额或额度可用的模型服务账号。首次使用建议先在本机单用户环境运行；前端直接由后端提供，不需要安装 Node.js 或单独构建前端。
+准备 **Git、Python 3.10 或以上版本**。本地演示和离线教学不需要模型凭据；真实生成另需有权使用的模型服务账号。当前验证以 Windows 本机、单 worker 为主，支持独立账号数据；前端由后端提供，不需要安装 Node.js 或单独构建。
 
 ### 方式一：自己安装
 
@@ -42,7 +42,9 @@ test -f .env || cp .env.example .env
 
 如需提取可访问 PDF 的文本，可补装 `python -m pip install pypdf`。扫描件不等于已经取得正文，可能仍需额外解析或 OCR。
 
-**第二步：配置自己的模型。**
+**第二步：选择离线展示或真实模型配置。**
+
+首次体验可跳过本节模型配置，直接用第三步的本地展示入口。该入口主动关闭真实模型和文献网络调用，即使 `.env` 中已有密钥也不启用。
 
 用文本编辑器打开 `.env`。要进行真实模型调用，至少配置：
 
@@ -79,10 +81,10 @@ tasks:
 
 不要把 `.env`、真实密钥、私人论文或项目数据提交到 Git。使用云端模型与解析服务时，相应内容可能发送给服务商，请先确认权限与隐私要求。
 
-**第三步：启动并打开工作台。**
+**第三步：启动并打开本地展示工作台。**
 
 ```bash
-python -m uvicorn web.api:app --host 127.0.0.1 --port 8001 --workers 1
+python -m tools.serve_local --mode demo --port 8001
 ```
 
 保持这个终端运行，在浏览器打开：
@@ -90,11 +92,21 @@ python -m uvicorn web.api:app --host 127.0.0.1 --port 8001 --workers 1
 - 工作台：[http://127.0.0.1:8001/workspace](http://127.0.0.1:8001/workspace)
 - API 文档：[http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs)
 
-看到页面只代表网页已启动，不代表模型和文献源都已验证。第一次请用一个小范围主题测试，检查“任务进度”和“待确认事项”，确认拿到了实际来源和有效回复。
+此入口免登录，仅绑定本机，读取仓库的 `projects/`；新克隆不含开发者的历史项目。可查看已有资料和体验离线教学，不支持真实模型自由对话。
+
+要体验注册与账号隔离，在另一个终端运行：
+
+```bash
+python -m tools.serve_local --mode accounts --port 8077 --allow-registration
+```
+
+访问 [8077 账号入口](http://127.0.0.1:8077/)。默认数据在 Windows 的 `%LOCALAPPDATA%/ScientificAgent/account-workspace/`，与演示数据分开。邮箱暂不验证归属；密码须为 8–256 字符且不超过 1024 字节，支持大小写字母、数字和特殊符号，拦截部分常见弱密码，不提供完整泄露检测或邮件找回。
+
+**真实调用是另一种启动配置**：`tools.serve_local` 始终禁用真实调用，不能只改 `SRA_DRY_RUN` 就开启。需要在已初始化的账号数据目录下，显式配置 `SRA_AUTH_MODE=accounts`、`SRA_DATA_ROOT`、`SRA_PROJECTS_DIR`、`SRA_ACCOUNTS_DB`，为本机 HTTP 设置 `SRA_AUTH_INSECURE_HTTP=1`，核对模型路由、凭据与预算后，以单 worker 启动 `web.api:app`。不要把真实服务切到免登录演示目录。先在独立测试数据和空闲端口验证，不能据页面可访问推断模型与文献源已通过。
 
 停止服务时，在启动终端按 `Ctrl+C`。以后重新使用时，进入仓库、激活环境，再运行同一启动命令即可，**不需要重新安装或重新创建项目**。
 
-请使用单 worker，暂不增加进程数。若端口已被占用，先确认是不是本项目已在运行，不要直接结束不认识的进程。需要换端口时，在 `.env` 设置 `SRA_WEB_PORT=8002`，并将启动命令改为 `--port 8002`，访问地址也相应调整。
+请使用单 worker，暂不增加进程数。若端口已被占用，先确认是不是本项目已在运行，不要直接结束不认识的进程。展示入口可通过 `--port` 换空闲端口，账号版不能使用保留给演示的 8001。停止时在对应终端按 `Ctrl+C`，不影响另一入口。
 
 ### 方式二：交给编程 Agent 安装
 
@@ -103,6 +115,8 @@ python -m uvicorn web.api:app --host 127.0.0.1 --port 8001 --workers 1
 ```text
 请帮我安装 Scientific Agent：
 https://github.com/weimeng09280929/scientific-agent
+
+使用默认 main 分支中的最新发布版本。
 
 1. 先检查当前目录、Python 版本及是否已有仓库；已有代码则保留改动，
    不要覆盖文件、删除数据或强制重置 Git。
@@ -115,8 +129,11 @@ https://github.com/weimeng09280929/scientific-agent
    缺少凭据或模型标识时先问我，不要编造可用模型。
 5. 经我确认真实调用模式及可能的费用后，再设置 SRA_DRY_RUN=false。
    未经确认不要调用收费 API、创建真实研究任务或运行实验。
-6. 检查端口占用；不要杀死未知进程。以单 worker 启动：
-   python -m uvicorn web.api:app --host 127.0.0.1 --port 8001 --workers 1
+6. 检查端口占用；不要杀死未知进程。首次只启动本机离线展示：
+   python -m tools.serve_local --mode demo --port 8001
+   若需要注册登录，在另一个终端启动独立账号入口：
+   python -m tools.serve_local --mode accounts --port 8077 --allow-registration
+   这两个入口强制关闭真实调用，不要把它们当作真实生成验证。
 7. 验证 /workspace 和 /docs 可以访问，说明这仅验证网页启动，
    不代表真实模型与文献检索已经通过；后续真实调用另行征求同意。
 8. 最后告诉我访问地址、启动与停止方式、配置了哪些文件，
@@ -127,11 +144,23 @@ https://github.com/weimeng09280929/scientific-agent
 
 ### 数据保存、更新与服务器运行
 
-科研项目保存在仓库下的 `projects/`，模型凭据在 `.env`，任务路由在 `config/tasks.yaml`。换机器前应备份这些内容；共享备份时注意其中可能包含私人材料与密钥。
+演示项目保存在仓库下的 `projects/`；账号版默认在 `%LOCALAPPDATA%/ScientificAgent/account-workspace/`，其中有账号库和 `projects/`。模型凭据在 `.env`，任务路由在 `config/tasks.yaml`。换机器前备份对应实例；私人资料和密钥应单独妥善保管，不上传源码仓库。
+
+本地备份工具为 `python -m tools.local_backup`，支持 `precheck`、`backup`、`verify`、`restore`。**仅支持实例正常停止后的冷备份**；`--confirm-stopped` 是确认已停止，不会替你停止进程。以账号版为例，在确认该实例停止后运行（先创建目标父目录，备份和恢复目标使用新目录）：
+
+```powershell
+$sraAccountRoot = Join-Path $env:LOCALAPPDATA 'ScientificAgent/account-workspace'
+python -m tools.local_backup precheck --root "$sraAccountRoot" --mode accounts --confirm-stopped
+python -m tools.local_backup backup --root "$sraAccountRoot" --mode accounts --confirm-stopped --destination 'D:/sra-backups/backup-001'
+python -m tools.local_backup verify --backup 'D:/sra-backups/backup-001'
+python -m tools.local_backup restore --backup 'D:/sra-backups/backup-001' --destination 'D:/sra-restored/instance-001'
+```
+
+恢复不能覆盖原实例；恢复后可通过 `tools.serve_local --mode accounts --port 8077 --data-root 'D:/sra-restored/instance-001'` 查看恢复副本（先确认端口空闲）。备份含账号和项目资料，不应公开。Windows 有实际验证；Linux 尚未实测。
 
 更新代码前，先停止服务并备份数据，使用 `git status` 检查本地改动。工作区干净时可执行 `git pull --ff-only`，再重新安装依赖并核对配置；有未提交改动时先保存或合并，不要用强制覆盖解决冲突。
 
-服务器上也可按相同步骤搭建，但当前版本应先用于受控的小范围验证。**不要只把启动地址改成 0.0.0.0 就当作完成公网部署。** 面向公众开放前，还需要登录与项目权限隔离、HTTPS、调用限额、文件访问保护和备份恢复验收；当前单进程任务状态也不能靠增加 worker 直接扩容。
+当前本地账号隔离、资源限制和冷备份恢复已有实现与专项验证，仍不代表公网交付完成。**不要只把启动地址改成 0.0.0.0 就当作完成公网部署。** HTTPS、真实部署环境的身份与文件保护、容量与费用控制仍需整体验收；当前单进程任务状态也不能靠增加 worker 直接扩容。
 
 ### 安装后自查
 

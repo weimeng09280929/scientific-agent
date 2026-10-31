@@ -20,7 +20,6 @@ from core.research_tasks.service import (
     TaskError,
     TaskNotFound,
 )
-from core.research_tasks.synthesis import report_markdown
 from core.research_tasks.detect import SearchIntent
 from core.workspace.schema import Contract
 from core.workspace.service import WorkspaceError
@@ -39,6 +38,10 @@ def build_research_task_router(config, require_project, task_factory):
     router = APIRouter(tags=["research-tasks"])
 
     def fail(exc: WorkspaceError):
+        from core.workspace.conversation_moves import ConversationMoved
+        if isinstance(exc, ConversationMoved):
+            from web.conversation_move_api import moved_error
+            moved_error(exc, config.paths, require_project)
         code = (
             404
             if isinstance(exc, TaskNotFound)
@@ -134,40 +137,17 @@ def build_research_task_router(config, require_project, task_factory):
         project_id: str,
         task_id: str,
         version: int | None = Query(default=None, ge=1),
+        catalog: bool = Query(default=False),
     ):
         service = service_for(project_id)
         try:
-            view = service.get(task_id)
+            content = service.report_document(task_id, version, catalog=catalog)
         except WorkspaceError as exc:
             fail(exc)
-        content = None
-        if version is not None:
-            entry = next(
-                (v for v in (view.get("report_versions") or []) if v.get("version") == version),
-                None,
-            )
-            if entry is None:
-                raise HTTPException(404, f"报告版本 v{version} 不存在")
-            # 历史版本按其交付时的状态渲染，不冒充当前状态。
-            content = report_markdown(
-                {
-                    "topic": view["topic"],
-                    "task_id": task_id,
-                    "status": entry.get("status") or view["status"],
-                    "status_label": view["status_label"],
-                    "year_label": view.get("year_label") or "未限定年份",
-                    "limits": view["limits"],
-                    "queries": view["queries"],
-                    "source_calls": view["source_calls"],
-                    "report": entry.get("report") or {},
-                    "report_versions": view.get("report_versions") or [],
-                }
-            ) or None
-        content = content or view.get("report_markdown") or (
-            "任务尚未产出报告；当前状态：" + view["status_label"]
-        )
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in task_id)[:100]
         suffix = f"-v{version}" if version is not None else ""
+        if catalog:
+            suffix += "-catalog"
         return Response(
             content=content,
             media_type="text/markdown",

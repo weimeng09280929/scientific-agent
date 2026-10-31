@@ -15,9 +15,12 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import threading
 import uuid
+import contextvars
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -116,6 +119,11 @@ from core.project_archive import archive_project_directories  # noqa: E402
 from core.project_catalog import project_metadata, project_rows, project_page, recent_conversations, has_active_chat  # noqa: E402
 from typing import Annotated
 from fastapi import Query
+from fastapi import Request
+from pydantic import Field as AuthField
+from core.local_accounts import AccountStore, SESSION_SECONDS, MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH
+from core.resource_limits import RESOURCES, ACTOR, CapacityError, heavy_operation
+import hmac
 
 from core.config import get_config  # noqa: E402
 from core.product_boundary import inspect_boundary, public_boundary, historical_stage, NOTICE  # noqa: E402
@@ -292,9 +300,34 @@ class ProjectState:
 
 logger = logging.getLogger("sra.api")
 _CONFIG = get_config()
+_AUTH_MODE = os.environ.get("SRA_AUTH_MODE", "accounts").strip().lower()
+if _AUTH_MODE not in {"local", "accounts"}:
+    raise RuntimeError("SRA_AUTH_MODE 必须为 local 或 accounts")
+_ACCOUNT_STORE = AccountStore(Path(os.environ.get("SRA_ACCOUNTS_DB") or (_CONFIG.paths.projects / ".local-accounts.db")))
+if _AUTH_MODE == "accounts" and not _ACCOUNT_STORE.path.is_file():
+    raise RuntimeError("账号模式的账号库尚未初始化；请先运行管理命令")
+if _AUTH_MODE == "accounts":
+    _ACCOUNT_STORE.check_schema()
+_CURRENT_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar("sra_user", default=None)
+
+
+def _active_user() -> str:
+    user = _CURRENT_USER.get()
+    if _AUTH_MODE == "accounts" and user is None:
+        raise HTTPException(401, "请重新登录")
+    return user or ""
+
+
+def _check_owner(project_id: str) -> None:
+    if _AUTH_MODE == "accounts":
+        directory = _CONFIG.paths.project_dir(project_id)
+        if (directory.is_symlink() or directory.resolve().parent != _CONFIG.paths.projects.resolve()
+                or not _CONFIG.paths.project_db(project_id).resolve().is_relative_to(directory.resolve())
+                or not _ACCOUNT_STORE.owns(project_id, _active_user())):
+            raise HTTPException(404, "项目不存在")
 _PROJECTS: dict[str, ProjectState] = {}
 _BRIDGE = HumanCallbackBridge()
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()  # Move confirmation and project archive share this short guard.
 
 
 def _recover_project_topic(pid: str) -> str:
@@ -595,6 +628,7 @@ def _run_topic_discovery_thread(project_id: str, interest: str, resume: bool) ->
                 state.thread = pipeline_thread
                 state.status = "running"
                 pipeline_thread.start()
+            pipeline_thread.join()
     except Exception as e:  # noqa: BLE001
         state.status = "failed"
         state.error = f"{type(e).__name__}: {e}"
@@ -651,12 +685,45 @@ def _extract_topic_discovery_summary(node_history: list[dict]) -> dict:
 # ===== FastAPI 应用 =====
 
 
-app = FastAPI(title="科研 Agent 系统", version="0.1.0")
+from contextlib import asynccontextmanager
+from core.instance_state import running_instance
+
+
+@asynccontextmanager
+async def _instance_lifespan(application):
+    def settled():
+        counts = RESOURCES.snapshot()
+        return not counts["heavy"] and not counts["receive"] and not any(
+            p.thread is not None and p.thread.is_alive() for p in _PROJECTS.values()
+        )
+    with running_instance(_CONFIG.paths.root, _CONFIG.paths.projects,
+                          _ACCOUNT_STORE.path if _AUTH_MODE == "accounts" else None,
+                          _AUTH_MODE, clean_shutdown=settled):
+        from core.workspace.conversation_moves import recover_journals
+        if recover_journals(_CONFIG.paths):_scan_existing_projects()
+        yield
+
+
+app = FastAPI(title="科研 Agent 系统", version="0.1.0", lifespan=_instance_lifespan)
+
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+
+
+@app.exception_handler(RequestValidationError)
+async def private_login_validation(request, exc):
+    if request.url.path in {"/api/auth/login", "/api/auth/register"}:
+        # FastAPI's default validation includes the rejected input. Never echo
+        # a password in a validation response or an attached error report.
+        registering = request.url.path == "/api/auth/register"
+        return JSONResponse({"detail":"请填写有效邮箱，并设置 8–256 位且确认一致的密码" if registering else "邮箱或密码错误，或尝试过于频繁，请稍后重试"}, status_code=422 if registering else 401,
+                            headers={"Cache-Control":"private, no-store"})
+    return await request_validation_exception_handler(request, exc)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -762,6 +829,8 @@ def create_project(req: CreateProjectRequest) -> dict:
     )
     with _LOCK:
         _PROJECTS[project_id] = state
+    if _AUTH_MODE == "accounts":
+        _ACCOUNT_STORE.claim_new(project_id, _active_user())
     store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
     store.save_kv("research.topic", topic)
     store.save_kv("project.domain", state.domain)
@@ -785,6 +854,9 @@ def list_projects(
     with _LOCK:
         _scan_existing_projects()
         states = list(_PROJECTS.values())
+        if _AUTH_MODE == "accounts":
+            allowed = _ACCOUNT_STORE.project_ids(_active_user())
+            states = [state for state in states if state.project_id in allowed]
     page = project_page(project_rows(_CONFIG.paths, states), limit=limit, offset=offset,
                         q=q, include_project_id=include_project_id)
     # New paged clients only: derive shared progress for the visible project
@@ -813,6 +885,9 @@ def list_recent_conversations(
     with _LOCK:
         _scan_existing_projects()
         states = list(_PROJECTS.values())
+        if _AUTH_MODE == "accounts":
+            allowed = _ACCOUNT_STORE.project_ids(_active_user())
+            states = [state for state in states if state.project_id in allowed]
     projects = project_rows(_CONFIG.paths, states)
     result = recent_conversations(_CONFIG.paths, projects, limit=limit, offset=offset,q=q)
     result["current_conversation"] = None
@@ -837,6 +912,8 @@ def delete_project(project_id: str) -> dict:
 def delete_projects_batch(req: BatchDeleteProjectsRequest) -> dict:
     """Preflight the whole selection, archive files, then remove active entries."""
     ids = req.project_ids
+    for pid in ids:
+        _check_owner(pid)
     if len(ids) != len(set(ids)):
         raise HTTPException(status_code=422, detail="项目编号重复，本批未删除")
     if any(not re.fullmatch(r"[A-Za-z0-9_-]{1,120}", pid) for pid in ids):
@@ -1014,14 +1091,16 @@ def run_project(project_id: str, req: Optional[RunProjectRequest] = None) -> dic
     store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
     resume = state.status != "created" or bool(store.get_kv("pipeline.context.v1"))
     force_writing = (req.force_writing if req else False)
-    thread = threading.Thread(
-        target=_run_pipeline_thread,
-        args=(project_id, state.topic, resume, force_writing),
-        daemon=True,
-    )
     with _LOCK:
         if state.status in ("running", "pending_human") or (state.thread is not None and state.thread.is_alive()):
             raise HTTPException(status_code=409, detail="已有任务正在运行或等待确认，不能重复启动")
+        lease = RESOURCES.acquire()
+        try:
+            thread = threading.Thread(target=lease.worker(lambda: _run_pipeline_thread(
+                project_id, state.topic, resume, force_writing)), daemon=True)
+        except Exception:
+            lease.close()
+            raise HTTPException(503, "后台任务未能启动，请保留原输入并手动重试") from None
         state.thread = thread
         state.error = None
         state.status = "running"
@@ -1029,9 +1108,10 @@ def run_project(project_id: str, req: Optional[RunProjectRequest] = None) -> dic
         try:
             thread.start()
         except Exception:
+            lease.close()
             state.thread = None
             state.status = "failed"
-            raise
+            raise HTTPException(503, "后台任务未能启动，请保留原输入并手动重试") from None
     msg = "pipeline 已启动"
     if force_writing:
         msg = "pipeline 已启动（强制写作模式：绕过实验成败判断）"
@@ -1068,26 +1148,29 @@ def run_topic_discovery(project_id: str, req: TopicDiscoveryRequest) -> dict:
     # 不允许通过该接口把历史非计算机项目静默改为另一领域。
     _public_domain(state.domain)
     domain = _public_domain((req.domain or "").strip() or state.domain)
-    state.domain = domain  # 记录/更新研究领域
-    thread = threading.Thread(
-        target=_run_topic_discovery_thread,
-        args=(project_id, interest, resume),
-        daemon=True,
-    )
     with _LOCK:
         if state.status in ("running", "pending_human") or (state.thread is not None and state.thread.is_alive()):
             raise HTTPException(status_code=409, detail="已有任务正在运行或等待确认，不能重复启动")
+        lease = RESOURCES.acquire()
+        try:
+            thread = threading.Thread(target=lease.worker(lambda: _run_topic_discovery_thread(
+                project_id, interest, resume)), daemon=True)
+        except Exception:
+            lease.close()
+            raise HTTPException(503, "后台任务未能启动，请保留原输入并手动重试") from None
         state.thread = thread
         state.error = None
         state.topic = interest
+        state.domain = domain
         state.status = "running"
         state.run_mode = "topic_discovery"
         try:
             thread.start()
         except Exception:
+            lease.close()
             state.thread = None
             state.status = "failed"
-            raise
+            raise HTTPException(503, "后台任务未能启动，请保留原输入并手动重试") from None
     return {"project_id": project_id, "message": "topic_discovery 已启动", "interest": interest, "domain": domain}
 
 
@@ -1772,6 +1855,7 @@ def _paper_identifiers_from_evidence(source: str, external_id: str) -> tuple[str
 
 
 @app.post("/api/projects/{project_id}/papers/import")
+@heavy_operation
 def import_unlinked_paper(project_id: str, body: dict) -> dict:
     """手动补录入库：将一条未关联证据候选正式入库为论文，并回填证据链关联。
 
@@ -1946,7 +2030,7 @@ def download_paper_pdf(project_id: str, paper_id: str):
     """
     _require_project(project_id)
     try:
-        store = KnowledgeStore(_CONFIG.paths.project_db(project_id))
+        store = KnowledgeStore(_CONFIG.paths.project_db(project_id), initialize=False)
         try:
             paper = store.get_paper(paper_id)
         except Exception:  # noqa: BLE001
@@ -1957,13 +2041,25 @@ def download_paper_pdf(project_id: str, paper_id: str):
         raise HTTPException(status_code=404, detail="论文不存在")
 
     # 1. 已有本地文件 → 直接返回
-    if paper.pdf_path and os.path.exists(paper.pdf_path):
+    from core.storage_paths import project_file
+    local_pdf = project_file(paper.pdf_path, _CONFIG.paths.project_dir(project_id), data_root=_CONFIG.paths.root) if paper.pdf_path else None
+    if local_pdf is not None and local_pdf.is_file():
+        if _AUTH_MODE == "accounts" and not local_pdf.is_relative_to(
+            _CONFIG.paths.project_dir(project_id).resolve()
+        ):
+            raise HTTPException(404, "项目文件不存在")
         return FileResponse(
-            paper.pdf_path,
+            str(local_pdf),
             media_type="application/pdf",
             filename=f"{paper.paper_id}.pdf",
         )
 
+    return _fetch_paper_pdf(project_id, paper_id, paper, store)
+
+
+@heavy_operation
+def _fetch_paper_pdf(project_id, paper_id, paper, store):
+    from web.bounded_uploads import read_remote_bounded, RemoteFileTooLarge
     # 2. 解析目标 PDF URL
     meta = paper.metadata or {}
     pdf_url = (meta.get("pdf_url") or "").strip()
@@ -1997,8 +2093,12 @@ def download_paper_pdf(project_id: str, paper_id: str):
                         metadata={**meta, "pdf_url": pdf_url, "doi": meta_tmp["doi"]},
                         source_stage=paper.source_stage, created_at=paper.created_at,
                     ))
+                except RemoteFileTooLarge:
+                    raise
                 except Exception:  # noqa: BLE001
                     pass
+        except RemoteFileTooLarge:
+            raise
         except Exception:  # noqa: BLE001
             pdf_url = ""
     if not pdf_url:
@@ -2022,8 +2122,7 @@ def download_paper_pdf(project_id: str, paper_id: str):
 
     def _download(url: str, timeout: int = 30) -> bytes:
         resp = _req.get(url, headers=headers, timeout=timeout, stream=True)
-        resp.raise_for_status()
-        return resp.content
+        return read_remote_bounded(resp)
 
     def _extract_pdf_from_html(html: bytes, base_url: str) -> str:
         """从出版商标注页解析真实 PDF 地址（citation_pdf_url / og:url 等）。"""
@@ -2070,6 +2169,8 @@ def download_paper_pdf(project_id: str, paper_id: str):
             oa = find_open_access_pdf(doi, title=paper.title or "", force=True)
             if oa and oa not in candidates:
                 candidates.append(oa)
+        except RemoteFileTooLarge:
+            raise
         except Exception:  # noqa: BLE001
             pass
 
@@ -2086,8 +2187,12 @@ def download_paper_pdf(project_id: str, paper_id: str):
                     content = _download(pdf_href)
                     if _is_pdf(content):
                         break
+                except RemoteFileTooLarge:
+                    raise
                 except Exception:  # noqa: BLE001
                     pass
+        except RemoteFileTooLarge:
+            raise
         except Exception as e:  # noqa: BLE001
             tried.append(f"{url} ({e})")
             content = b""
@@ -2111,6 +2216,8 @@ def download_paper_pdf(project_id: str, paper_id: str):
                     pdf_href = _extract_pdf_from_html(content, final_url)
                     if pdf_href:
                         content = _download(pdf_href)
+        except RemoteFileTooLarge:
+            raise
         except Exception:  # noqa: BLE001
             content = b""
 
@@ -2126,8 +2233,11 @@ def download_paper_pdf(project_id: str, paper_id: str):
     try:
         proj_dir = _CONFIG.paths.project_dir(project_id)
         pdf_dir = os.path.join(proj_dir, "papers")
+        if not Path(pdf_dir).resolve().is_relative_to(proj_dir.resolve()):
+            raise HTTPException(404, "项目文件不存在")
         os.makedirs(pdf_dir, exist_ok=True)
-        local_path = os.path.join(pdf_dir, f"{paper_id}.pdf")
+        safe_id = paper_id if re.fullmatch(r"[A-Za-z0-9_-]{1,120}", paper_id) else hashlib.sha256(paper_id.encode()).hexdigest()
+        local_path = os.path.join(pdf_dir, f"{safe_id}.pdf")
         with open(local_path, "wb") as f:
             f.write(content)
         # 回写 pdf_path（存 DB）
@@ -2149,8 +2259,12 @@ def download_paper_pdf(project_id: str, paper_id: str):
                 created_at=paper.created_at,
             )
             store.save_paper(_paper)
+        except RemoteFileTooLarge:
+            raise
         except Exception:  # noqa: BLE001
             pass  # 回写失败不影响本次下载
+    except RemoteFileTooLarge:
+        raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"保存 PDF 失败: {e}") from e
 
@@ -2270,6 +2384,7 @@ def regenerate_method_doc(project_id: str, req: Optional[RegenerateMethodDocRequ
                     "message": "已有重新生成任务进行中，请稍后用状态接口查询"}
         if state.thread is not None and state.thread.is_alive():
             raise HTTPException(status_code=409, detail="当前科研任务仍在运行，请在阶段结束后再生成方法修订稿")
+        lease = RESOURCES.acquire()
         _METHOD_REGEN_JOBS[project_id] = {
             "status": "running", "content": "", "message": "", "error": "",
         }
@@ -2306,8 +2421,9 @@ def regenerate_method_doc(project_id: str, req: Optional[RegenerateMethodDocRequ
                 }
 
     try:
-        threading.Thread(target=_run, daemon=True).start()
-    except Exception:
+        threading.Thread(target=lease.worker(_run), daemon=True).start()
+    except BaseException:
+        lease.close()
         with _METHOD_REGEN_LOCK:
             _METHOD_REGEN_JOBS[project_id] = {"status":"failed", "error":"后台生成任务未能启动"}
         raise HTTPException(status_code=503, detail="后台生成任务未能启动，请稍后重试")
@@ -2669,6 +2785,8 @@ def download_artifact(project_id: str, artifact_type: str, format: str = "md", p
     if artifact_type in ("experiment-tasks", "experiment-code"):
         exp_dir = _CONFIG.paths.project_dir(project_id) / "experiments"
         readme_path = exp_dir / "README.md"
+        if _AUTH_MODE == "accounts" and not readme_path.resolve().is_relative_to(_CONFIG.paths.project_dir(project_id).resolve()):
+            raise HTTPException(404, "项目文件不存在")
         if readme_path.exists():
             md_content = readme_path.read_text(encoding="utf-8")
         else:
@@ -3319,6 +3437,7 @@ def _md_split_table_row(line: str) -> list[str]:
     """Split Markdown columns without breaking TeX cardinality/norm expressions."""
     return [_md_strip_inline(cell) for cell in split_table_row(line)]
 
+@heavy_operation
 def _md_to_docx_response(md_content: str, base_filename: str) -> Response:
     """将 Markdown 转为 DOCX 并返回下载响应。
 
@@ -3464,6 +3583,7 @@ def _pdf_safe_text(text: str, max_chars: int = 100) -> str:
     return safe
 
 
+@heavy_operation
 def _md_to_pdf_response(md_content: str, base_filename: str) -> Response:
     """将 Markdown 转为 PDF 并返回下载响应。
 
@@ -3609,26 +3729,29 @@ def _draw_pdf_table(pdf: Any, font_name: str, header: list[str], rows: list[list
 # ===== 文件上传 =====
 
 
-@app.post("/api/projects/{project_id}/upload-paper")
-async def upload_paper(
-    project_id: str,
-    file: UploadFile = File(...),
-    title: Optional[str] = Form(None),
-    request_id: Optional[str] = Form(None, max_length=128),
-):
-    from core.workspace.uploads import UploadService,UploadError
+@app.post("/api/projects/{project_id}/upload-paper", openapi_extra={"requestBody": {
+    "required": True, "content": {"multipart/form-data": {"schema": {
+        "type": "object", "required": ["file"], "properties": {
+            "file": {"type": "string", "format": "binary"},
+            "title": {"type": "string"}, "request_id": {"type": "string", "maxLength": 128}
+        }}}}}})
+async def upload_paper(project_id: str, request: Request):
+    from core.workspace.uploads import UploadService, UploadError
     from starlette.concurrency import run_in_threadpool
+    from web.bounded_uploads import receive_upload, read_bounded
     _require_project(project_id)
-    raw = await file.read()
-    rid = request_id or uuid.uuid4().hex
-    filename = file.filename or "uploaded.txt"
-    try:
-        service = UploadService(_CONFIG.paths.project_db(project_id),project_id)
-        result = await run_in_threadpool(service.process,rid,filename,raw,title,
-            lambda capture,paper_id: _prepare_upload(project_id,raw,filename,title,capture,paper_id))
-        return JSONResponse(status_code=202 if result["status"]=="processing" else 200,content=result)
-    except UploadError as exc:
-        raise HTTPException(exc.code,detail=str(exc)) from exc
+    async with receive_upload(request) as (form, file):
+        raw = await read_bounded(file)
+        title = form.get("title")
+        rid = form.get("request_id") or uuid.uuid4().hex
+        filename = file.filename or "uploaded.txt"
+        try:
+            service = UploadService(_CONFIG.paths.project_db(project_id), project_id)
+            result = await run_in_threadpool(service.process, rid, filename, raw, title,
+                lambda capture, paper_id: _prepare_upload(project_id, raw, filename, title, capture, paper_id))
+            return JSONResponse(status_code=202 if result["status"] == "processing" else 200, content=result)
+        except UploadError as exc:
+            raise HTTPException(exc.code, detail=str(exc)) from exc
 
 
 @app.get("/api/projects/{project_id}/upload-requests/{request_id}")
@@ -3641,7 +3764,25 @@ def upload_request_state(project_id: str,request_id: str):
         raise HTTPException(exc.code,detail=str(exc)) from exc
 
 
-def _prepare_upload(project_id,raw,filename,title,store,paper_id):
+def _prepare_upload(project_id, raw, filename, title, store, paper_id):
+    try:
+        return _prepare_upload_content(project_id, raw, filename, title, store, paper_id)
+    except BaseException as exc:
+        if re.fullmatch(r"paper_[a-f0-9]{12}", paper_id) and Path(filename).name == filename:
+            project_root = _CONFIG.paths.project_dir(project_id).resolve()
+            root = (project_root / "uploads").resolve()
+            output = root / (paper_id + "_" + filename)
+            if root.is_relative_to(project_root):
+                for owned in (output.with_suffix(output.suffix + ".part"), output):
+                    if owned.resolve().parent == root and owned.is_file():
+                        owned.unlink()
+        if isinstance(exc, HTTPException):
+            from core.workspace.uploads import UploadError
+            raise UploadError(str(exc.detail), exc.status_code) from None
+        raise
+
+
+def _prepare_upload_content(project_id,raw,filename,title,store,paper_id):
     """上传 PDF/文本文献，入库为 Paper 实体。
 
     支持 .pdf / .txt / .md 文件。PDF 按现有解析能力提取片段，
@@ -3676,7 +3817,10 @@ def _prepare_upload(project_id,raw,filename,title,store,paper_id):
 
     if ext == ".pdf":
         # PDF：保存到项目目录，调用 MinerU 解析结构化内容（推荐工具）
-        upload_dir = _CONFIG.paths.project_dir(project_id) / "uploads"
+        project_root = _CONFIG.paths.project_dir(project_id).resolve()
+        upload_dir = project_root / "uploads"
+        if not upload_dir.resolve().is_relative_to(project_root):
+            raise HTTPException(400, "上传目录不在当前项目内，未保存文件")
         upload_dir.mkdir(parents=True, exist_ok=True)
         # A new upload must not overwrite the file backing an older paper.
         pdf_path = upload_dir / (paper_id + "_" + filename)
@@ -3728,6 +3872,9 @@ def _prepare_upload(project_id,raw,filename,title,store,paper_id):
     elif ext in (".txt", ".md"):
         parse_mode = "text"
         abstract = text_content[:5000]
+
+    if ext == ".pdf" and (parse_error or not abstract.strip()):
+        raise HTTPException(422, "PDF 解析未完成，未入库；请核对文件或改用可读取的文本后手动重试")
 
     from core.knowledge import Paper
     # 清理文件名/标题中可能残留的前端 HTML 标签
@@ -3822,19 +3969,27 @@ def _prepare_upload(project_id,raw,filename,title,store,paper_id):
     }
 
 
-@app.post("/api/projects/{project_id}/upload-topic")
-async def upload_topic(
-    project_id: str,
-    file: UploadFile = File(...),
-):
-    """上传主题描述文件（.txt/.md），覆盖项目主题。"""
+@app.post("/api/projects/{project_id}/upload-topic", openapi_extra={"requestBody": {
+    "required": True, "content": {"multipart/form-data": {"schema": {
+        "type": "object", "required": ["file"],
+        "properties": {"file": {"type": "string", "format": "binary"}}
+    }}}}})
+async def upload_topic(project_id: str, request: Request):
+    from web.bounded_uploads import receive_upload, read_bounded
     state = _require_project(project_id)
-    raw = await file.read()
-    text = raw.decode("utf-8", errors="replace").strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="文件内容为空")
-    state.topic = text
-    return {"project_id": project_id, "topic": text, "message": "主题已更新"}
+    async with receive_upload(request) as (form, file):
+        with RESOURCES.acquire():
+            if Path(file.filename or "").suffix.lower() not in (".txt", ".md"):
+                raise HTTPException(400, "主题文件仅支持 .txt 或 .md")
+            raw = await read_bounded(file)
+            try:
+                text = raw.decode("utf-8-sig").strip()
+            except UnicodeDecodeError:
+                raise HTTPException(400, "主题文件不是有效 UTF-8，请转换编码后重试") from None
+            if not text:
+                raise HTTPException(400, "文件内容为空")
+            state.topic = text
+            return {"project_id": project_id, "topic": text, "message": "主题已更新"}
 
 
 # ===== 辅助 =====
@@ -3848,11 +4003,12 @@ def _artifact_manager(project_id: str, *, read_only=False):
     """
     from core.artifacts import ArtifactContentStore, ArtifactManager
     store = KnowledgeStore(_CONFIG.paths.project_db(project_id),read_only=read_only)
-    content_store = ArtifactContentStore(_CONFIG.paths.project_artifacts(project_id))
+    content_store = ArtifactContentStore(_CONFIG.paths.project_artifacts(project_id), read_only=read_only)
     return ArtifactManager(store, content_store)
 
 
 def _require_project(project_id: str) -> ProjectState:
+    _check_owner(project_id)
     with _LOCK:
         if project_id not in _PROJECTS and re.fullmatch(r"[A-Za-z0-9_-]{1,120}", project_id):
             if _CONFIG.paths.project_db(project_id).is_file():
@@ -3880,6 +4036,8 @@ from web.project_exports_api import build_exports_router  # noqa: E402
 
 
 def _register_conversation_project(pid, topic, domain, created_at):
+    if _AUTH_MODE == "accounts":
+        _ACCOUNT_STORE.claim_new(pid, _active_user())
     with _LOCK:
         if pid not in _PROJECTS:
             store = KnowledgeStore(_CONFIG.paths.project_db(pid),read_only=True)
@@ -3887,12 +4045,162 @@ def _register_conversation_project(pid, topic, domain, created_at):
                                           display_name=store.get_kv("project.display_name",topic))
 
 
-app.include_router(build_home_router(lambda:_CONFIG,_require_project,_register_conversation_project))
+app.include_router(build_home_router(lambda:_CONFIG,_require_project,_register_conversation_project,
+                                     owner_id=lambda: _active_user() if _AUTH_MODE == "accounts" else None))
 app.include_router(build_exports_router(lambda:_CONFIG, _require_project,
     lambda state:_workspace_workflow(state,include_materials=True), download_artifact,
     _make_download, _md_to_docx_response, _md_to_pdf_response))
 
 app.include_router(build_workspace_router(_CONFIG, _require_project,workflow_provider=lambda state:_workspace_workflow(state,include_materials=True)))
+from web.conversation_move_api import build_move_router
+app.include_router(build_move_router(lambda:_CONFIG,_require_project,_check_owner,_active_user,_LOCK))
+
+class _LoginBody(BaseModel):
+    email: str = AuthField(min_length=3, max_length=254)
+    password: str = AuthField(min_length=1, max_length=256)
+
+
+class _RegisterBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    email: str = AuthField(min_length=3, max_length=254)
+    password: str = AuthField(min_length=8, max_length=256)
+    confirm_password: str = AuthField(min_length=8, max_length=256)
+
+
+def _registration_allowed(request: Request) -> bool:
+    return (_AUTH_MODE == "accounts" and os.environ.get("SRA_ALLOW_LOCAL_REGISTRATION") == "1"
+            and request.client is not None and request.client.host in {"127.0.0.1","::1","testclient"}
+            and request.url.hostname in {"127.0.0.1","::1","localhost","testserver"})
+
+
+@app.get("/api/auth/options")
+def auth_options(request: Request):
+    return {"mode":_AUTH_MODE,"registration_enabled":_registration_allowed(request),
+            "min_password_length":MIN_PASSWORD_LENGTH,"max_password_length":MAX_PASSWORD_LENGTH,
+            "email_verification_required":False}
+
+
+@app.post("/api/auth/register", status_code=201)
+def auth_register(body: _RegisterBody, request: Request):
+    if not _registration_allowed(request):
+        raise HTTPException(404,"Not Found")
+    remote = request.client.host if request.client else "unknown"
+    if not _ACCOUNT_STORE.allow_registration_attempt(remote):
+        raise HTTPException(429,"注册尝试过于频繁，请 15 分钟后再试",headers={"Retry-After":"900"})
+    if body.password != body.confirm_password:
+        raise HTTPException(422,"两次密码不一致，请重新核对")
+    try:
+        _ACCOUNT_STORE.create_user(body.email,body.password)
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from None
+    except sqlite3.IntegrityError:
+        raise HTTPException(409,"该邮箱暂时无法注册，请核对或使用已有账号登录") from None
+    return {"created":True,"email_verified":False,"message":"注册成功，邮箱尚未验证。请使用刚设置的密码登录。"}
+
+
+def _auth_view(row):
+    return {"user": {"id": row["id"], "email": row["email"],
+                     "email_verified": False},
+            "csrf_token": row["csrf_token"]}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    if _AUTH_MODE != "accounts":
+        return {"mode": "local"}
+    row = _ACCOUNT_STORE.session(request.cookies.get("sra_session"))
+    if row is None:
+        raise HTTPException(401, "请登录")
+    return _auth_view(row)
+
+
+@app.post("/api/auth/login")
+def auth_login(body: _LoginBody, request: Request, response: Response):
+    if _AUTH_MODE != "accounts":
+        raise HTTPException(404, "Not Found")
+    remote = request.client.host if request.client else "unknown"
+    result = _ACCOUNT_STORE.login(body.email, body.password, remote)
+    if result is None:
+        raise HTTPException(401, "邮箱或密码错误，或尝试过于频繁，请稍后重试")
+    token, csrf, user = result
+    _ACCOUNT_STORE.logout(request.cookies.get("sra_session"))
+    secure = os.environ.get("SRA_AUTH_INSECURE_HTTP") != "1"
+    response.set_cookie("sra_session", token, max_age=SESSION_SECONDS,
+                        httponly=True, secure=secure, samesite="lax", path="/")
+    return {"user": user, "csrf_token": csrf}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response):
+    if _AUTH_MODE != "accounts":
+        raise HTTPException(404, "Not Found")
+    _ACCOUNT_STORE.logout(request.cookies.get("sra_session"))
+    response.delete_cookie("sra_session", path="/", samesite="lax")
+    return {"ok": True}
+
+
+async def account_boundary(request: Request, call_next):
+    """One fail-closed boundary for current and legacy routes, including downloads."""
+    path = request.url.path
+    def denied(code, detail):
+        return JSONResponse({"detail": detail}, status_code=code,
+                            headers={"Cache-Control": "private, no-store", "Vary": "Cookie"})
+    if _AUTH_MODE == "local":
+        # The historical local mode is usable only from a loopback client.
+        if (request.client is None or request.client.host not in {"127.0.0.1", "::1", "testclient"}
+                or request.url.hostname not in {"127.0.0.1", "::1", "localhost", "testserver"}):
+            return denied(403, "本地模式仅允许回环访问")
+        if path.startswith("/api/") and request.method not in {"GET","HEAD","OPTIONS"}:
+            origin = request.headers.get("origin")
+            if ((origin and origin != str(request.base_url).rstrip("/"))
+                    or request.headers.get("sec-fetch-site") == "cross-site"):
+                return denied(403, "本地演示不接受其他网站提交的修改请求")
+        return await call_next(request)
+    if os.environ.get("SRA_AUTH_INSECURE_HTTP") == "1" and (
+        request.client is None or request.client.host not in {"127.0.0.1", "::1", "testclient"}
+        or request.url.hostname not in {"127.0.0.1", "::1", "localhost", "testserver"}
+    ):
+        return denied(403, "开发 HTTP 模式仅允许回环访问")
+    # No other path may serve files from the project root; static is code only.
+    if path.startswith("/api/"):
+        origin = request.headers.get("origin")
+        if origin and origin != str(request.base_url).rstrip("/"):
+            return denied(403, "跨站请求已拒绝")
+        if request.headers.get("sec-fetch-site") == "cross-site":
+            return denied(403, "跨站请求已拒绝")
+        public_writes = {"/api/auth/login", "/api/auth/register"}
+        if path in public_writes and request.method == "POST" and request.headers.get("x-sra-login") != "1":
+            return denied(403, "请求校验失败，请刷新后重试")
+        row = _ACCOUNT_STORE.session(request.cookies.get("sra_session"))
+        public_auth = path in {"/api/auth/login", "/api/auth/register", "/api/auth/me", "/api/auth/options"}
+        if row is None and not public_auth:
+            return denied(401, "请重新登录")
+        # A stale page must not start reading a newly logged-in account through
+        # the browser's shared cookie. The header binds fetches to its session.
+        if row and path not in public_writes and request.headers.get("x-sra-csrf") is not None:
+            if not hmac.compare_digest(request.headers["x-sra-csrf"].encode(), row["csrf_token"].encode()):
+                return denied(401 if request.method in {"GET", "HEAD"} else 403,
+                              "登录状态已变化，请重新登录")
+        if row and request.method not in {"GET", "HEAD", "OPTIONS"} and path not in public_writes:
+            supplied = request.headers.get("x-sra-csrf", "")
+            if not hmac.compare_digest(supplied.encode(), row["csrf_token"].encode()):
+                return denied(403, "请求校验失败，请刷新后重试")
+        match = None if path == "/api/projects/batch-delete" else re.match(
+            r"^/api/projects/([^/]+)(?:/|$)", path)
+        if match and (not re.fullmatch(r"[A-Za-z0-9_-]{1,120}",match.group(1)) or
+                      row is None or not _ACCOUNT_STORE.owns(match.group(1), row["id"])):
+            return denied(404, "项目不存在")
+        token = _CURRENT_USER.set(row["id"] if row else None)
+        resource_actor = ACTOR.set(row["id"] if row else "unauthenticated")
+        try:
+            response = await call_next(request)
+        finally:
+            _CURRENT_USER.reset(token)
+            ACTOR.reset(resource_actor)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Vary"] = "Cookie"
+        return response
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -3903,7 +4211,12 @@ async def teaching_execution_boundary(request, call_next):
     from core.workspace.conversations import ConversationService
     from core.workspace.teaching import teaching_identity
     match = re.match(r"^/api/projects/([A-Za-z0-9_-]+)/(.+)$", request.url.path)
-    if request.method in ("POST", "PUT") and match:
+    if request.method in ("POST", "PUT") and match and (
+        _AUTH_MODE == "local" or (
+            (session := _ACCOUNT_STORE.session(request.cookies.get("sra_session"))) is not None
+            and _ACCOUNT_STORE.owns(match.group(1), session["id"])
+        )
+    ):
         pid, tail = match.groups()
         blocked = tail in {"run", "resume", "run-topic-discovery", "regenerate-method-doc", "human-response", "papers/import", "upload-paper", "upload-topic", "workspace/guide"} or "research-tasks" in tail
         db = _CONFIG.paths.project_db(pid)
@@ -3914,6 +4227,27 @@ async def teaching_execution_boundary(request, call_next):
             except ValueError:
                 pass  # The owning endpoint reports storage/ownership errors.
     return await call_next(request)
+
+
+# Last added is outermost: identity/CSRF must run before any middleware reads
+# a project, including the historical teaching execution guard.
+app.middleware("http")(account_boundary)
+
+
+@app.exception_handler(CapacityError)
+async def resource_capacity_error(request, exc):
+    return JSONResponse(status_code=429, content={"detail": str(exc), "reason_code": exc.code,
+        "retryable": True, "retry_after_seconds": 5},
+        headers={"Retry-After": "5", "Cache-Control": "private, no-store"})
+
+
+@app.get("/api/resource-limits")
+def resource_limits():
+    limits = RESOURCES.limits
+    return {"heavy_per_user": limits.heavy_user, "heavy_global": limits.heavy_global,
+            "upload_file_bytes": limits.file_bytes, "upload_request_bytes": limits.body_bytes,
+            "upload_max_files": 1, "upload_max_fields": 2, "upload_field_bytes": limits.field_bytes,
+            "queue": False}
 
 
 @app.get("/workspace")
@@ -3956,6 +4290,10 @@ def static_files(file_path: str) -> FileResponse:
     target = (STATIC_DIR / file_path).resolve()
     if not target.is_relative_to(STATIC_DIR.resolve()) or not target.is_file():
         raise HTTPException(status_code=404, detail="Not Found")
+    if target == (STATIC_DIR / "workspace.html").resolve():
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse("/workspace", status_code=307,
+                                headers={"Cache-Control":"no-store"})
     return FileResponse(
         target,
         headers={
@@ -3964,8 +4302,8 @@ def static_files(file_path: str) -> FileResponse:
             "Expires": "0",
         },
     )
-# 挂载静态目录（/static/...）
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# The checked route above is the only static-file entry; project directories
+# and the legacy workspace shell are never exposed through a fallback mount.
 
 
 if __name__ == "__main__":
@@ -3973,4 +4311,7 @@ if __name__ == "__main__":
 
     # 优先取 SRA_WEB_PORT；Render/Fly 等 PaaS 注入 $PORT 时兼容使用
     port = int(os.environ.get("SRA_WEB_PORT") or os.environ.get("PORT") or "8001")
-    uvicorn.run("web.api:app", host="0.0.0.0", port=port, reload=False)
+    host = os.environ.get("SRA_WEB_HOST", "127.0.0.1")
+    if _AUTH_MODE == "local" and host not in {"127.0.0.1", "::1", "localhost"}:
+        raise RuntimeError("本地单用户模式必须绑定回环地址")
+    uvicorn.run("web.api:app", host=host, port=port, reload=False)
