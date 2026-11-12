@@ -1,0 +1,101 @@
+{
+  "96c7ae0c8c4f4f54a11360d961f43379": {
+    "paper_a79d41062469": {
+      "title": "Dense Passage Retrieval for Open-Domain Question Answering",
+      "paper_id": "paper_a79d41062469",
+      "preview_origin": "body_opening",
+      "abstract": "",
+      "excerpts": [
+        {
+          "excerpt_id": "paper_a79d41062469_c5:0:1021",
+          "chunk_id": "paper_a79d41062469_c5",
+          "text": "iven a questionq,\nthe task is to ﬁnd a spanw(i)s ,w (i)s+1,··· ,w (i)e from\none of the passagespi that can answer the question.\nNotice that to cover a wide variety of domains, the\ncorpus size can easily range from millions of docu-\nments (e.g., Wikipedia) to billions (e.g., the Web).\nAs a result, any open-domain QA system needs to\ninclude an efﬁcientretriever component that can se-\nlect a small set of relevant texts, before applying the\nreader to extract the answer (Chen et al., 2017). 4\nFormally speaking, a retriever R : (q,C)→C F\nis a function that takes as input a questionq and a\ncorpusC and returns a much smaller ﬁlter set of\ntextsCF⊂C , where|CF| =k≪|C| . For a ﬁxed\nk, a retriever can be evaluated in isolation on top-k\nretrieval accuracy, which is the fraction of ques-\ntions for whichCF contains a span that answers the\nquestion.\n3 Dense Passage Retriever (DPR)\nWe focus our research in this work on improv-\ning the retrieval component in open-domain QA.\nGiven a collection ofM text passages, the goal of\n",
+          "page": 2,
+          "chunk_index": 5,
+          "start": 0,
+          "end": 1021,
+          "origin": "body_excerpt"
+        },
+        {
+          "excerpt_id": "paper_a79d41062469_c5:841:1600",
+          "chunk_id": "paper_a79d41062469_c5",
+          "text": "ion.\n3 Dense Passage Retriever (DPR)\nWe focus our research in this work on improv-\ning the retrieval component in open-domain QA.\nGiven a collection ofM text passages, the goal of\nour dense passage retriever (DPR) is to index all\nthe passages in a low-dimensional and continuous\nspace, such that it can retrieve efﬁciently the top\nk passages relevant to the input question for the\nreader at run-time. Note thatM can be very large\n(e.g., 21 million passages in our experiments, de-\nscribed in Section 4.1) andk is usually small, such\nas 20–100.\n3.1 Overview\nOur dense passage retriever (DPR) uses a dense\nencoderEP (·) which maps any text passage to ad-\ndimensional real-valued vectors and builds an index\nfor all theM passages that we will use for retrieval.\n",
+          "page": 2,
+          "chunk_index": 5,
+          "start": 841,
+          "end": 1600,
+          "origin": "body_excerpt"
+        }
+      ]
+    }
+  },
+  "042a6aa89c1244068e6acc4f347af5ee": {
+    "paper_a79d41062469": {
+      "title": "Dense Passage Retrieval for Open-Domain Question Answering",
+      "paper_id": "paper_a79d41062469",
+      "preview_origin": "body_opening",
+      "abstract": "Proceedings of the 2020 Conference on Empirical Methods in Natural Language Processing , pages 6769–6781,\nNovember 16–20, 2020. c©2020 Association for Computational Linguistics\n6769\nDense Passage Retrieval for Open-Domain Question Answering\nVladimir Karpukhin∗, Barlas O˘guz∗, Sewon Min†, Patrick Lewis,\nLedell Wu, Sergey Edunov, Danqi Chen‡, Wen-tau Yih\nFacebook AI †University of Washington ‡Princeton University\n{vladk, barlaso, plewis, ledell, edunov, scottyih }@fb.com\nsewon@cs.washington.edu\ndanqic@cs.princeton.edu\nAbstract\nOpen-domain question answering relies on ef-\nﬁcient passage retrieval to select candidate\ncontexts, where traditional sparse vector space\nmodels, such as TF-IDF or BM25, are the de\nfacto method. In this work, we show that\nretrieval can be practically implemented us-\ning dense representations alone, where em-\nbeddings are learned from a small number\nof questions and passages by a simple dual-\nencoder framework. When evaluated on a\nwide range of open-domain QA datasets, our\ndense retriever outperforms a strong Lucene-\nBM25 system greatly by 9%-19% absolute in\nterms of top-20 passage retrieval accuracy, and\nhelps our end-to-end QA system establish new\n",
+      "excerpts": [
+        {
+          "excerpt_id": "paper_a79d41062469_c5:0:1021",
+          "chunk_id": "paper_a79d41062469_c5",
+          "text": "iven a questionq,\nthe task is to ﬁnd a spanw(i)s ,w (i)s+1,··· ,w (i)e from\none of the passagespi that can answer the question.\nNotice that to cover a wide variety of domains, the\ncorpus size can easily range from millions of docu-\nments (e.g., Wikipedia) to billions (e.g., the Web).\nAs a result, any open-domain QA system needs to\ninclude an efﬁcientretriever component that can se-\nlect a small set of relevant texts, before applying the\nreader to extract the answer (Chen et al., 2017). 4\nFormally speaking, a retriever R : (q,C)→C F\nis a function that takes as input a questionq and a\ncorpusC and returns a much smaller ﬁlter set of\ntextsCF⊂C , where|CF| =k≪|C| . For a ﬁxed\nk, a retriever can be evaluated in isolation on top-k\nretrieval accuracy, which is the fraction of ques-\ntions for whichCF contains a span that answers the\nquestion.\n3 Dense Passage Retriever (DPR)\nWe focus our research in this work on improv-\ning the retrieval component in open-domain QA.\nGiven a collection ofM text passages, the goal of\n",
+          "page": 2,
+          "chunk_index": 5,
+          "start": 0,
+          "end": 1021,
+          "origin": "body_excerpt"
+        },
+        {
+          "excerpt_id": "paper_a79d41062469_c14:0:1018",
+          "chunk_id": "paper_a79d41062469_c14",
+          "text": "6773\nTraining Retriever Top-20 Top-100\nNQ TriviaQA WQ TREC SQuAD NQ TriviaQA WQ TREC SQuAD\nNone BM25 59.1 66.9 55.0 70.9 68.8 73.7 76.7 71.1 84.1 80.0\nSingle DPR 78.4 79.4 73.2 79.8 63.2 85.4 85.0 81.4 89.1 77.2BM25 + DPR 76.6 79.8 71.0 85.2 71.5 83.8 84.5 80.5 92.7 81.3\nMulti DPR 79.4 78.8 75.0 89.1 51.6 86.0 84.7 82.9 93.9 67.6BM25 + DPR 78.0 79.9 74.7 88.5 66.2 83.9 84.4 82.3 94.1 78.6\nTable 2: Top-20 & Top-100 retrieval accuracy on test sets, measured as the percentage of top 20/100 retrieved\npassages that contain the answer. Single and Multi denote that our Dense Passage Retriever (DPR) was trained\nusing individial or combined training datasets (all the datasets excluding SQuAD). See text for more details.\ntraditional retrieval methods, the effects of different\ntraining schemes and the run-time efﬁciency.\nThe DPR model used in our main experiments\nis trained using the in-batch negative setting (Sec-\ntion 3.2) with a batch size of128 and one additional\nBM25 negative passage per question. We trained\n",
+          "page": 5,
+          "chunk_index": 14,
+          "start": 0,
+          "end": 1018,
+          "origin": "body_excerpt"
+        }
+      ]
+    }
+  },
+  "fb05a3cdb5c048bbafb3da9d81585558": {
+    "paper_c93db1237b0d": {
+      "title": "Efficient Passage Retrieval with Hashing for Open-domain Question Answering",
+      "paper_id": "paper_c93db1237b0d",
+      "preview_origin": "body_opening",
+      "abstract": "",
+      "excerpts": [
+        {
+          "excerpt_id": "paper_c93db1237b0d_c12:0:1046",
+          "chunk_id": "paper_c93db1237b0d_c12",
+          "text": " Faiss (Johnson et al.,\n2019). Further details are provided in Appendix A.\n4.1 Results\nMain results Table 1 presents the top-k recall\n(for k ∈{ 1, 20, 100}), EM QA accuracy, index\nsize, and query time achieved by BPR and base-\nlines on the NQ and TQA test sets. BPR achieves\nsimilar or even better performance than DPR in\nboth retrieval withk≥ 20 and EM accuracy with\na substantially reduced index size from 65GB to\n2GB. We observe that BPR performs worse than\nDPR fork = 1, but usually the recall in smallk is\nless important because the reader usually produces\nan answer based onk≥ 20 passages. BPR signiﬁ-\ncantly outperforms all quantization baselines. The\nquery time of BPR is substantially shorter than that\nof DPR. Hash table lookup is faster than linear scan\nbut requires slightly more storage. DPR+HNSW\nis faster than BPR; however, it requires 151GB of\nstorage.\nAblations Table 2 shows the results of our ab-\nlation study. Disabling the reranking clearly de-\ngrades performance, demonstrating the effective-\nness of our two-stage approach.",
+          "page": 4,
+          "chunk_index": 12,
+          "start": 0,
+          "end": 1046,
+          "origin": "body_excerpt"
+        },
+        {
+          "excerpt_id": "paper_c93db1237b0d_c10:0:1041",
+          "chunk_id": "paper_c93db1237b0d_c10",
+          "text": "982\nModel Top 1 Top 20 Top 100 QA Acc. (EM) Index\nsize\nQuery\ntimeNQ TQA NQ TQA NQ TQA NQ TQA\nDPR 46.0 53.5 78.4 79.4 85.4 85.0 41.5 56.8 64.6GB 456.9ms\nDPR + HNSW 45.7 53.2 78.8 78.8 85.2 84.2 41.2 56.6 151.0GB 1.8ms\nDPR + Simple LSH 21.5 28.4 63.9 65.2 77.2 76.9 35.8 48.1 2.0GB 28.8ms\nDPR + PQ 32.5 42.8 72.2 73.2 81.2 80.4 38.4 52.0 2.0GB 44.0ms\nBPR (linear scan;l = 1000) 41.1 49.7 77.9 77.9 85.7 84.5 41.6 56.8 2.0GB 85.3ms\nBPR (hash table lookup;l = 1000) \" \" \" \" \" \" \" \" 2.2GB 38.1ms\nTable 1: Topk recall and exact match (EM) QA accuracy on test sets with the index size and query time of BPR\nand baselines. All models use the same reader based on BERT-base to evaluate the QA accuracy.\nModel Top 1 Top 20 Top 100 Query\ntimeNQ TQA NQ TQA NQ TQA\nBPR (l = 1000) 41.1 49.7 77.9 77.9 85.7 84.5 38.1ms\nBPR w/o reranking 38.0 46.1 76.5 75.9 84.9 83.4 37.9ms\nBPR w/o candidate generation 41.1 49.7 77.9 77.9 85.7 84.5 457.8ms\nTable 2: Results of our ablation study. Hash table lookup is used to implement candidate generation.\n4 Experiments\n",
+          "page": 4,
+          "chunk_index": 10,
+          "start": 0,
+          "end": 1041,
+          "origin": "body_excerpt"
+        }
+      ]
+    }
+  },
+  "13b80736a83b4b6b98be770fa43d4fa7": {
+    "paper_c93db1237b0d": {
+      "title": "Efficient Passage Retrieval with Hashing for Open-domain Question Answering",
+      "paper_id": "paper_c93db1237b0d",
+      "preview_origin": "body_opening",
+      "abstract": "Proceedings of the 59th Annual Meeting of the Association for Computational Linguistics\nand the 11th International Joint Conference on Natural Language Processing (Short Papers) , pages 979–986\nAugust 1–6, 2021. ©2021 Association for Computational Linguistics\n979\nEfﬁcient Passage Retrieval with Hashing for Open-domain\nQuestion Answering\nIkuya Yamada†,‡ Akari Asai∗ Hannaneh Hajishirzi∗,§\n†Studio Ousia ‡RIKEN ∗University of Washington\n§Allen Institute for AI\nikuya@ousia.jp {akari,hannaneh}@cs.washington.edu\nAbstract\nMost state-of-the-art open-domain question\nanswering systems use a neural retrieval model\nto encode passages into continuous vectors\nand extract them from a knowledge source.\nHowever, such retrieval models often require\nlarge memory to run because of the massive\nsize of their passage index. In this paper, we\nintroduce Binary Passage Retriever (BPR), a\nmemory-efﬁcient neural retrieval model that\nintegrates a learning-to-hash technique into\nthe state-of-the-art Dense Passage Retriever\n(DPR) (Karpukhin et al., 2020) to represent\nthe passage index using compact binary codes\nrather than continuous vectors. BPR is trained\nwith a multi-task objective over two tasks: ef-\n",
+      "excerpts": []
+    }
+  }
+}

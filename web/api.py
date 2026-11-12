@@ -1229,6 +1229,7 @@ def list_papers(project_id: str) -> dict:
                     "pdf_url": tmp.get("pdf_url", ""),
                     "doi": tmp.get("doi", p.doi or "")}
 
+        from core.knowledge.paper_text import preview_label
         result.append({
             "paper_id": p.paper_id,
             "title": p.title,
@@ -1237,6 +1238,8 @@ def list_papers(project_id: str) -> dict:
             "venue": p.venue,
             "arxiv_id": p.arxiv_id,
             "abstract": p.abstract,
+            "text_label": preview_label(p),
+            "pages_without_text": meta.get("pages_without_text"),
             "url": p.url or (f"https://arxiv.org/abs/{p.arxiv_id}" if p.arxiv_id else None),
             "doi": p.doi or meta.get("doi", ""),
             "doi_url": (f"https://doi.org/{p.doi or meta.get('doi', '')}" if (p.doi or meta.get("doi", "")) else None),
@@ -1959,6 +1962,7 @@ def import_unlinked_paper(project_id: str, body: dict) -> dict:
             "relevance_score": 0.0,
             "relevance_reason": "手动补录入库",
             "manually_imported": True,
+            "text_origin": "imported_excerpt",
         },
         source_stage="research",
     )
@@ -3833,48 +3837,38 @@ def _prepare_upload_content(project_id,raw,filename,title,store,paper_id):
 
         # MinerU 解析（无 API key 时降级到 pypdf fallback）
         from core.tools import parse_pdf_with_mineru, mineru_is_available
-        if mineru_is_available():
-            try:
-                mineru_doc = parse_pdf_with_mineru(pdf_path)
-                parse_mode = mineru_doc.mode
-                sections_count = len(mineru_doc.sections)
-                figures_count = len(mineru_doc.figures)
-                # 优先使用 MinerU 抽取的 title
-                extracted_title = mineru_doc.title if mineru_doc.title else None
-                # 拼接前 2000 字作为 abstract
-                abstract = mineru_doc.full_text[:2000] if mineru_doc.full_text else ""
-                if not abstract.strip():
-                    parse_error = "PDF 已保存，但未提取到可读取正文，请补充文本或核对文件"
-                # 把 MinerU 解析的结构化数据存入 KV（前端可视化与 discovery 阶段使用）
-                store.save_kv(f"mineru_{paper_id}", {
-                    "title": mineru_doc.title,
-                    "sections_count": sections_count,
-                    "figures_count": figures_count,
-                    "tables_count": len(mineru_doc.tables),
-                    "equations_count": len(mineru_doc.equations),
-                    "references_count": len(mineru_doc.references),
-                    "mode": parse_mode,
-                    "sections": [
-                        {"heading": s.heading, "level": s.level, "page": s.page}
-                        for s in mineru_doc.sections[:30]
-                    ],
-                })
-                if extracted_title and not title:
-                    title = extracted_title
-            except Exception:
-                parse_mode = "error"
-                abstract = ""
-                parse_error = "PDF 已保存，但解析失败；未读取正文，请补充文本后讨论"
-        else:
-            parse_mode = "fallback"
-            parse_error = "PDF 已保存，解析服务未启用；仅有元信息，请补充文本"
+        from core.tools.mineru_parse import parse_pdf_locally
+        try:
+            parse = parse_pdf_with_mineru if mineru_is_available() else parse_pdf_locally
+            mineru_doc = parse(pdf_path)
+            parse_mode = mineru_doc.mode
+            sections_count = len(mineru_doc.sections)
+            figures_count = len(mineru_doc.figures)
+            abstract = (mineru_doc.full_text or "").lstrip()[:2000]
+            store.save_kv(f"mineru_{paper_id}", {
+                "title": mineru_doc.title,
+                "sections_count": sections_count,
+                "figures_count": figures_count,
+                "tables_count": len(mineru_doc.tables),
+                "equations_count": len(mineru_doc.equations),
+                "references_count": len(mineru_doc.references),
+                "mode": parse_mode,
+                "sections": [
+                    {"heading": s.heading, "level": s.level, "page": s.page}
+                    for s in mineru_doc.sections[:30]
+                ],
+            })
+            if mineru_doc.title and not title:
+                title = mineru_doc.title
+        except Exception:
+            parse_error = "PDF 未能解析为可用正文"
 
     elif ext in (".txt", ".md"):
         parse_mode = "text"
         abstract = text_content[:5000]
 
     if ext == ".pdf" and (parse_error or not abstract.strip()):
-        raise HTTPException(422, "PDF 解析未完成，未入库；请核对文件或改用可读取的文本后手动重试")
+        raise HTTPException(422, "PDF 解析未取得可用正文，未入库。请核对文本层与本地解析依赖，扫描件可改用可读文本后手动重试。")
 
     from core.knowledge import Paper
     # 清理文件名/标题中可能残留的前端 HTML 标签
@@ -3890,6 +3884,9 @@ def _prepare_upload_content(project_id,raw,filename,title,store,paper_id):
         metadata={
             "parse_mode": parse_mode,
             "parse_error": parse_error,
+            "text_origin": "body_opening",
+            "chunk_origin": "body",
+            "pages_without_text": getattr(mineru_doc, "parse_meta", {}).get("pages_without_text"),
             "reading_scope": (
                 "用户上传文本：已保存正文片段，展示为开头节选，不等于论文摘要或已核验全文"
                 if text_content else
@@ -3915,51 +3912,33 @@ def _prepare_upload_content(project_id,raw,filename,title,store,paper_id):
     except Exception as e:  # noqa: BLE001
         logger.warning("上传证据链落库失败: %s", e)
 
-    # txt/md 内容切分为 chunk（PDF 由 MinerU 解析后也会按 section 切分）
-    chunk_count = 0
-    if ext in (".txt", ".md") and text_content:
-        from core.tools import split_into_chunks
-        from core.knowledge import PaperChunk
-        text_chunks = split_into_chunks(text_content, max_tokens=500, overlap_tokens=50)
-        paper_chunks = [
-            PaperChunk(
-                chunk_id=f"{paper_id}_c{tc.index}",
-                paper_id=paper_id,
-                chunk_index=tc.index,
-                text=tc.text,
-            )
-            for tc in text_chunks
-        ]
-        if paper_chunks:
-            store.save_paper_chunks(paper_chunks)
-            chunk_count = len(paper_chunks)
-    elif mineru_doc is not None and abstract:
-        # MinerU 解析后按 section 切分 chunk（结构化优于字符切分）
-        try:
-            from core.knowledge import PaperChunk
-            paper_chunks = []
-            for i, sec in enumerate(mineru_doc.sections):
-                if not sec.text or len(sec.text.strip()) < 20:
-                    continue
-                paper_chunks.append(PaperChunk(
-                    chunk_id=f"{paper_id}_s{i}",
-                    paper_id=paper_id,
-                    chunk_index=i,
-                    text=sec.text[:1500],
-                ))
-                if len(paper_chunks) >= 30:  # 上限 30 section chunks
-                    break
-            if paper_chunks:
-                store.save_paper_chunks(paper_chunks)
-                chunk_count = len(paper_chunks)
-        except Exception:
-            pass
+    from core.knowledge import PaperChunk
+    from core.knowledge.paper_text import text_windows
+    if text_content:
+        segments = [(text_content, None)]
+    elif mineru_doc.sections and parse_mode != "local":
+        # Local text-layer fallback gives one physical PDF page per section.
+        segments = [(sec.text, sec.page if parse_mode=="fallback" else None)
+                    for sec in mineru_doc.sections if sec.text and sec.text.strip()]
+    else:
+        segments = [(mineru_doc.full_text, None)]
+    if not segments and mineru_doc and mineru_doc.full_text:
+        segments = [(mineru_doc.full_text, None)]
+    if ext == ".pdf" and sum(len(part) for part,_ in segments)>2_000_000:
+        raise HTTPException(422, "PDF 提取正文超过 200 万字符，未入库，请分文件后重试。")
+    paper_chunks = []
+    for part,page in segments:
+        for start,end in text_windows(part,1600,180):
+            index=len(paper_chunks)
+            paper_chunks.append(PaperChunk(chunk_id=f"{paper_id}_c{index}",paper_id=paper_id,
+                                           chunk_index=index,text=part[start:end],page=page))
+    store.save_paper_chunks(paper_chunks)
 
     return {
         "paper_id": paper_id,
         "title": paper.title,
         "filename": filename,
-        "chunks": chunk_count,
+        "chunks": len(paper_chunks),
         "parse_mode": parse_mode,
         "sections_count": sections_count,
         "figures_count": figures_count,

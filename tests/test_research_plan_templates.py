@@ -46,6 +46,17 @@ def model(context, *, literature=False):
     return d
 
 
+def core_payload(draft):
+    """Offline generator shape. Never use this to repair a saved raw response."""
+    suggestion = draft.suggestions[0]
+    plan = suggestion.plan.model_dump(mode="json")
+    return {
+        "title": suggestion.title,
+        **{name: plan[name] for name in ("sections", "conditions", "unconfirmed")},
+        "method_details": {k: v for k, v in plan["method_details"].items() if k != "type"},
+    }
+
+
 @pytest.mark.parametrize("method", list(METHODS))
 def test_three_method_structures_have_distinct_real_fields_and_do_not_execute(
     chat, method
@@ -381,7 +392,7 @@ def test_plan_request_idempotency_and_real_generation_context(chat):
                 .split("\n用户本次请求：\n", 1)[0]
             )
             seen.append((kwargs["task_type"], ctx))
-            return kwargs["output_schema"].model_validate(model(ctx).model_dump())
+            return kwargs["output_schema"].model_validate(core_payload(model(ctx)))
 
     chat.projects["p1"].domain = "mathematics"
     cid = create(chat, entry_stage="orientation")

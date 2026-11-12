@@ -5,8 +5,8 @@
 - 兼容 OpenAI 协议的本地部署模型（vLLM, Ollama, LM Studio 等）
 
 结构化输出实现：
-- 优先使用 response_format=json_schema（GPT-4o 及兼容服务支持）
-- 退化为 response_format=json_object + prompt 引导
+- 使用 response_format=json_object + JSON Schema 提示
+- 端点的 json_schema 支持需单独实测，本实现没有自动切换或降级
 - 最终用 Pydantic 校验，失败则抛 LLMError
 """
 
@@ -23,6 +23,7 @@ from core.llm.base import (
     EmbeddingRequest,
     EmbeddingResponse,
     LLMError,
+    LLMStructureError,
     LLMTruncatedError,
     LLMProvider,
     LLMRequest,
@@ -118,7 +119,7 @@ class OpenAIProvider(LLMProvider):
                 retry_after=retry_delay(response.headers.get("Retry-After")),
             )
 
-    def _request(self, fn, **kwargs):
+    def _request(self, fn, *, automatic_retry=True, **kwargs):
         from core.invocation_audit import CallLimitError
         from core.tools.search_result import retry_delay
         from openai import APIConnectionError, APIStatusError, APITimeoutError
@@ -153,6 +154,7 @@ class OpenAIProvider(LLMProvider):
 
                     if (
                         (ACTIVE.get() and ACTIVE.get().stop_on_model_failure)
+                        or not automatic_retry
                         or not retryable
                         or attempt >= self._retries
                         or delay is not None
@@ -228,6 +230,7 @@ class OpenAIProvider(LLMProvider):
                 temperature=request.temperature,
                 max_tokens=request.max_tokens,
                 response_format={"type": "json_object"},
+                automatic_retry=request.automatic_retry,
             )
         except Exception as e:
             raise LLMError(
@@ -257,18 +260,35 @@ class OpenAIProvider(LLMProvider):
             )
 
         try:
-            data = json.loads(text)
+            data = json.loads(text, object_pairs_hook=self._unique_fields)
+        except LLMStructureError:
+            from core.invocation_audit import span
+            with span("phase", "model", "schema_invalid:$:duplicate_key"):
+                raise
         except json.JSONDecodeError as e:
-            raise LLMError(
-                f"结构化输出返回非合法 JSON: {e}\n原始返回:\n{text[:500]}"
+            raise LLMStructureError(
+                f"结构化输出返回非合法 JSON（行 {e.lineno}，列 {e.colno}）",
+                [{"path": "$", "type": "json_invalid"}],
             ) from e
 
         try:
             return schema.model_validate(data)
         except ValidationError as e:
-            raise LLMError(
-                f"结构化输出不符合 schema: {e}\n原始返回:\n{text[:500]}"
-            ) from e
+            issues = [{"path": ".".join(str(p) for p in error["loc"])[:160], "type": error["type"]}
+                      for error in e.errors(include_input=False, include_url=False)[:8]]
+            from core.invocation_audit import span
+            with span("phase", "model", "schema_invalid:" + ";".join(i["path"]+":"+i["type"] for i in issues)[:400]):
+                raise LLMStructureError("结构化输出不符合 schema: " + json.dumps(issues, ensure_ascii=False), issues) from e
+
+    @staticmethod
+    def _unique_fields(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise LLMStructureError("结构化输出不符合 schema：JSON 含重复字段",
+                                        [{"path": "$", "type": "duplicate_key"}])
+            result[key] = value
+        return result
 
     @staticmethod
     def _looks_like_schema(text: str) -> bool:
@@ -350,7 +370,7 @@ class OpenAIProvider(LLMProvider):
             "返回一个符合以下 JSON Schema 的 JSON 对象。\n"
             "硬性要求：\n"
             "1. 仅返回 JSON 对象本身，不要包裹 markdown 代码块，不要任何解释文字\n"
-            "2. 不要返回 $defs / $schema / properties / type 等 schema 元字段\n"
+            "2. 不要复述 $defs / $schema / properties 等 schema 元字段；若实例字段定义了 type，须按该字段的枚举值填写\n"
             "3. 必须为所有 required 字段填入真实业务数据（字符串/数字/数组等）\n"
             f"\n需要填充的字段：\n{hints_text}\n"
             f"\n参考 JSON Schema：\n{schema_str}"

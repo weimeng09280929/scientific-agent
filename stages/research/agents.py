@@ -1271,6 +1271,7 @@ class PaperIngestAgent(AgentNode):
                     url=meta.get("url"),
                     metadata={
                         "source_subquery": meta.get("source_subquery", ""),
+                        "text_origin": "source_abstract",
                         "source": meta.get("source", ""),
                         "relevance_score": meta.get("relevance_score", 0.0),
                         "relevance_reason": meta.get("relevance_reason", ""),

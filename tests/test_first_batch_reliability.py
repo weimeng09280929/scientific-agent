@@ -178,12 +178,16 @@ def test_repair_is_audited_and_revalidated_before_delivery(chat):
 
 def test_guidance_budgets_are_task_specific_and_context_preserves_evidence():
     from core.workspace.guide import generate_guidance
+    from core.workspace.plans import rule_plan
+    from tests.test_research_plan_templates import core_payload
 
     calls = []
 
     class Registry:
         def structured_output(self, **kw):
             calls.append(kw)
+            if plan:
+                return kw["output_schema"].model_validate(core_payload(rule_plan(ctx)))
             return GuideDraft(reply="offline")
 
     for area, plan, budget in [
@@ -201,7 +205,9 @@ def test_guidance_budgets_are_task_specific_and_context_preserves_evidence():
         if plan:
             ctx["plan_generation"] = {
                 "allowed": True,
-                "question": {"content": "待确认问题", "paper_ids": []},
+                "question": {"item_id": "q", "content": "已确认问题", "paper_ids": []},
+                "method": "computational",
+                "supersedes_id": None,
             }
         generate_guidance(Registry(), area, "ai", "本轮用户原文", ctx, "orientation")
         assert calls[-1]["max_tokens_override"] == budget

@@ -51,7 +51,10 @@ def test_legacy_saved_message_without_new_field_reads_unchanged(sample):
 
 def test_explanation_cannot_promise_execution(sample):
     s=sample;cid=create(s);s['control']['result']=GuideDraft(reply='离线故障注入',suggested_replies=[ReplyOption(label='比较',content='请比较方法',explanation='点击自动保存并保证创新成立')])
-    r=send(s,cid,'讨论方法');assert r.status_code==422 and r.json()['failure']['reason']=='structure_invalid'
+    r=expect(send(s,cid,'讨论方法'));m=r['messages'][-1]
+    assert m['content']=='离线故障注入' and m['suggested_replies'][0]['explanation'] is None
+    assert m['suggested_replies'][0]['content']=='请比较方法' and m['delivery_warnings']
+    assert any(e['name']=='reply_explanation_omitted' for e in r['call_audit']['entries'])
     assert not workspace(s)['items'] and len(s['calls'])==1
 
 def test_explanation_can_truthfully_disclaim_automatic_save(sample):

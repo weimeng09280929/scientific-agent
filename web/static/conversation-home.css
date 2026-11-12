@@ -170,6 +170,8 @@ body[data-page="dashboard"] #flow-nav-host, body[data-page="dashboard"] #sidebar
 .ch-plan-tools>p { margin:6px 0; }.ch-plan-tools>.btn { font-size:12px; padding:6px 10px; }
 .ch-plan-review { border:1px solid var(--color-border); background:#f9fbfd; border-radius:6px; padding:10px; margin:12px 0; overflow-wrap:anywhere; font-size:12px; }
 .ch-plan-review .ch-rich { max-height:430px; overflow:auto; }.ch-plan-controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }.ch-plan-controls .btn { font-size:11px; white-space:normal; text-decoration:none; }
+.ch-plan-evidence>summary { cursor:pointer; color:var(--color-primary); }
+.ch-plan-source-quote { white-space:pre-wrap; overflow-wrap:anywhere; }
 .ch-compose:has(.ch-plan-tools[open]) { max-height:62dvh; overflow:auto; }
 .ch-file-pending { display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-size:12px; color:var(--color-text-secondary); overflow-wrap:anywhere; }
 .workspace-unified .card { margin-top:16px; overflow-wrap:anywhere; }

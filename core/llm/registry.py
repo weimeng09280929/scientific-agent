@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 from typing import Any, Optional, Type, TypeVar
 
@@ -226,6 +227,7 @@ class LLMRegistry:
         system: Optional[str] = None,
         temperature_override: Optional[float] = None,
         max_tokens_override: Optional[int] = None,
+        automatic_retry: bool = True,
     ) -> T:
         """按 task_type 调用 LLM 结构化输出。返回 Pydantic 实例。
 
@@ -244,6 +246,7 @@ class LLMRegistry:
             system=system,
             temperature=temperature_override if temperature_override is not None else cfg.temperature,
             max_tokens=token_budget,
+            automatic_retry=automatic_retry,
         )
         try:
             result = provider.structured_output(request, model=cfg.model)
@@ -251,7 +254,7 @@ class LLMRegistry:
         except LLMError as e:
             from core.llm.base import LLMTruncatedError
             from core.invocation_audit import ACTIVE
-            if ACTIVE.get() and ACTIVE.get().stop_on_model_failure:
+            if not automatic_retry or ACTIVE.get() and ACTIVE.get().stop_on_model_failure:
                 raise
             if isinstance(e, LLMTruncatedError):
                 # 推理和最终 JSON 共享预算。最多额外请求一次，且不超过 32768。
@@ -280,10 +283,18 @@ class LLMRegistry:
             # 在 prompt 末尾追加强提示
             reminder = (
                 "\n\n【重要】请直接返回符合 schema 的实例 JSON 数据，"
-                "不要返回 $defs / properties / type 等 schema 元字段。"
+                "不要复述 $defs / properties 等 schema 元字段；实例中声明的 type 字段必须保留。"
                 "例如若 schema 要求 {ideas: list[IdeaDraftItem]}，"
                 "应返回 {\"ideas\": [{\"text\": \"具体思路描述\", ...}]}。"
             )
+            issues = getattr(e, "structure_issues", None)
+            if issues:
+                reminder = (
+                    "\n\n【一次结构修复】上次实例未通过以下字段校验："
+                    + json.dumps(issues, ensure_ascii=False)
+                    + "。请修复这些字段并返回符合所给schema的完整实例。不要新增price、cost等未定义字段；"
+                    "保留原有事实、引用和待确认状态，不编造缺失资料。不能只返回schema定义或局部补丁。"
+                )
             if prompt is not None:
                 request = StructuredOutputRequest(
                     output_schema=output_schema,

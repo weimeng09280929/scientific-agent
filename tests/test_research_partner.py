@@ -43,7 +43,8 @@ def test_actual_website_provider_receives_policy_scope_and_preferences(sample,sc
     if scenario=='conflict':assert call['text']==text and workspace(s)['brief']==before['brief']
     expected={} if scenario=='broad' else {'title-only':'metadata','abstract-only':'abstract'}
     assert {p['paper_id']:p['content_available'] for p in ctx['papers']}==expected
-    assert ctx['paper_scope']['total_in_project']==len(expected) and ctx['paper_scope']['abstracts_provided']==(1 if expected else 0)
+    assert ctx['paper_scope']['total_in_project']==len(expected) and ctx['paper_scope']['abstracts_provided']==0
+    assert ctx['paper_scope']['text_previews_provided']==(1 if expected else 0)
     if expected:
         assert '未提供摘要或正文' in next(p['scope'] for p in ctx['papers'] if p['paper_id']=='title-only')
         assert '未提供全文' in next(p['scope'] for p in ctx['papers'] if p['paper_id']=='abstract-only')
@@ -123,10 +124,10 @@ def test_selected_excerpts_are_bounded_and_not_labeled_full_text(sample):
     from core.knowledge.schema import PaperChunk
     s=sample
     s['store'].save_paper_chunks([PaperChunk(chunk_id='chunk-'+str(i),paper_id='title-only',chunk_index=i,text='离线局部段落 '+str(i),page=i+1) for i in range(4)])
-    cid=create(s);expect(send(s,cid,'只解释本次实际提供的片段范围，不检索。',selected_paper_ids=['title-only']))
+    cid=create(s);expect(send(s,cid,'只解释本次提供的“局部段落”的阅读范围，不检索。',selected_paper_ids=['title-only']))
     ctx=s['calls'][-1]['context'];assert len(ctx['papers'])==1
-    p=ctx['papers'][0];assert p['content_available']=='excerpts' and len(p['excerpts'])==2
-    assert [e['page'] for e in p['excerpts']]==[1,2] and '不保证覆盖全文' in p['scope'] and '未提供摘要' in p['scope']
+    p=ctx['papers'][0];assert p['content_available']=='excerpts' and len(p['excerpts'])==3
+    assert [e['page'] for e in p['excerpts']]==[1,2,3] and '未提供全文' in p['scope'] and not p['abstract']
 
 
 @pytest.mark.parametrize('text',['我已确定做学习资料检索，想比较不同切入点。','把两个检索模块结合是不是有创新？','信息检索方向如何缩小范围？','搜索算法的基线是什么意思？'])

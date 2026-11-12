@@ -193,6 +193,17 @@ def test_real_resources_and_every_project_route(isolated, monkeypatch):
     assert a.get(f"/api/projects/{pa}/research-tasks/{task_b}/export").status_code == 404
     assert a.get(f"/api/projects/{pa}/papers/{paper_b}/pdf").status_code == 404
     assert a.post(f"/api/projects/{pa}/conversations/{cb}/research-tasks/{task_a}/cancel").status_code == 404
+    # This top-level preflight accepts a project ID in the body. Its title
+    # resolution must only read that account's own project.
+    reading_target = "/api/conversations/reading-target"
+    reading_body = {"project_id": pa, "content": "只看《A attachment》，解释方法。", "selected_paper_ids": [paper_a]}
+    calls_before_preflight = api._account_test_state["model_calls"]
+    assert a.post(reading_target, json=reading_body).json() == {"ok": True}
+    assert b.post(reading_target, json=reading_body).status_code == 404
+    rejected = b.post(reading_target, json={**reading_body, "project_id": pb})
+    assert rejected.status_code == 422
+    assert rejected.json()["detail"]["code"] == "paper_reading_target"
+    assert api._account_test_state["model_calls"] == calls_before_preflight
     # Exercise all installed project route methods, including legacy execution,
     # upload, reports, audit, restart, adoption and historical downloads.
     matrix=[]
@@ -202,8 +213,10 @@ def test_real_resources_and_every_project_route(isolated, monkeypatch):
             "message_id":"known-message","action_id":"known-action"}
     global_routes={"/api/projects","/api/projects/batch-delete","/api/conversations/start","/api/conversations/recent",
                    "/api/teaching-cases","/api/teaching-cases/start","/api/conversation-capabilities","/api/data-sources",
-                   "/api/auth/me","/api/auth/login","/api/auth/logout","/api/auth/options","/api/auth/register","/api/resource-limits"}
+                   "/api/auth/me","/api/auth/login","/api/auth/logout","/api/auth/options","/api/auth/register","/api/resource-limits",
+                   reading_target}
     with TestClient(api.app) as anonymous:
+        assert anonymous.post(reading_target, json=reading_body).status_code == 401
         for template, operations in api.app.openapi()["paths"].items():
             if template.startswith("/api/") and not template.startswith("/api/projects/{project_id}"):
                 assert template in global_routes, template

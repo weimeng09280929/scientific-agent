@@ -36,7 +36,7 @@ def turn_preferences(text):
     """Explicit response wishes, not a new research phase or saved user fact."""
     paused = is_paused(text)
     brief = bool(re.search(r"简短|简要|短一点|一句话|一两句|不超过\s*\d+\s*(?:字|句)", text))
-    detail = not brief and bool(re.search(r"详细|深入|展开|逐步解释|举(?:个|一个)?例|用例子", text))
+    detail = not brief and bool(re.search(r"详细|深入|展开|逐步解释|举(?:个|一个)?例|举[^。！？\n]{0,6}例子|用例子", text))
     confused = bool(re.search(r"没听懂|没看懂|不太懂|不是我的领域|再简单一点|听不懂", text))
     explain_only = confused or bool(re.search(r"(?:只(?:需要)?|仅(?:需)?).{0,8}(?:解释|说明|回答|讲清)", text))
     no_questions = bool(re.search(r"(?:不要|不用|无需|别)(?:再)?(?:追问|提问|问我|反问)", text))
@@ -72,7 +72,7 @@ def strategy(context, text=""):
         "【长度】" + length,
         "【推荐回复】suggested_replies 是用户可点击发送的话，label短、content是实际用户表达，不复制助手questions。需要解释区别时提供可选explanation（最多160字符），说明将讨论什么、预计得到概念解释/比较清单/待确认条件/候选问题/方法草案，必要时说明适用情况，必须与content一致。explanation不是额外授权，不能写已执行、自动检索、保存、采纳或保证创新与发表；执行能力只由服务器允许的actions决定。与actions合计0—4项，按需提供，不凑数；只解释或暂停可没有选项，不替用户编造资源。",
         "【允许操作】actions 只能是 view_references（已有引用）、open_plan（当前正式方案）、open_settings、adopt_suggestion（当前会话有效 question/plan 草案）。新草案用 suggestion_index，已有用 allowed_suggestions 中的 suggestion_id，不同时填写；目标 ID 和可用性由服务端核对。不输出URL或接口，不宣称已执行检索、保存或采纳；检索仍需用户走明确入口确认。",
-        "【输出契约】仅返回 GuideDraft：reply, cited_paper_ids, questions, suggestions, suggested_replies, actions。questions 是助手追问；suggestions 可为空，仅 note/question/plan，最多三条，不是正式记录。plan 仍须已确认问题、有效依据及明确生成请求。不得输出当前结构没有的 innovation_pattern 等字段。",
+        "【输出契约】仅返回 GuideDraft：reply, cited_paper_ids, questions, suggestions, suggested_replies, actions，阅读可附 reading_citations，研究缺口任务可附 research_gaps。questions 是助手追问；suggestions 可为空，仅 note/question/plan，最多三条，不是正式记录。plan 仍须已确认问题、有效依据及明确生成请求。不得输出当前结构没有的 innovation_pattern 等字段。",
     ])
 
 
@@ -205,6 +205,14 @@ def _validate_action(a, draft, context, allowed):
 
 
 def _prepare_display(draft,text,context,allowed):
+    if draft._omitted_reply_options:
+        warning = "部分推荐说明未通过结构检查，已省略对应推荐项；回答和方案仍须通过完整校验。"
+        warnings = context.setdefault("delivery_warnings", [])
+        if warning not in warnings:
+            warnings.append(warning)
+            from core.invocation_audit import span
+            with span("phase", "guidance", "reply_option_schema_omitted"):
+                pass
     prefs=turn_preferences(text)
     if (prefs['paused'] or prefs['explain_only']) and (draft.actions or draft.suggestions) and re.search(r"(?:已(?:经)?|成功)(?:明确)?(?:采纳|确认(?:研究)?问题|保存(?:了)?(?:方案|条件|记录)|启动(?:了)?(?:检索|实验))",draft.reply):
         raise WorkspaceError('本轮没有执行保存或采纳，不能交付声称已执行的回复')
@@ -214,11 +222,12 @@ def _prepare_display(draft,text,context,allowed):
                 "suggested_replies": [],
                 "actions": [],
                 "suggestions": [],
+                "research_gaps": [],
                 "questions": [],
             }
         )
     if prefs['explain_only']:
-        return draft.model_copy(update={'suggested_replies':[],'actions':[],'suggestions':[],'questions':[]})
+        return draft.model_copy(update={'suggested_replies':[],'actions':[],'suggestions':[],'research_gaps':[],'questions':[]})
     if re.search(r"(?:不要|不用|无需)(?:再|提供|给我)?(?:推荐|选项|按钮|追问)", text):
         return draft.model_copy(
             update={"suggested_replies": [], "actions": [], "questions": []}
@@ -234,7 +243,17 @@ def _prepare_display(draft,text,context,allowed):
     )
     for r in draft.suggested_replies:
         if r.explanation and re.search(r"(?<!不)(?<!不会)(?<!并非)(?:自动|立即|已经|保证|确保).{0,8}(?:检索|保存|采纳|执行|发表|创新|实验成功)|点击(?:后|即|就)(?:会)?(?:保存|采纳|执行)", r.explanation):
-            raise WorkspaceError("推荐回复说明不能承诺额外执行或科研结果；请说明本条讨论的预期")
+            # Optional UI metadata is not the answer or an execution request.
+            # Keep validating content/actions/evidence normally; use the UI's
+            # server-authored fallback rather than failing a valid answer.
+            r = r.model_copy(update={"explanation": None})
+            warning = "部分推荐说明未通过检查，已省略；按钮仍显示实际发送文字，不会额外执行操作。"
+            warnings = context.setdefault("delivery_warnings", [])
+            if warning not in warnings:
+                warnings.append(warning)
+                from core.invocation_audit import span
+                with span("phase", "guidance", "reply_explanation_omitted"):
+                    pass
         key = r.content.strip()
         if not key or not r.label.strip():
             raise WorkspaceError("推荐回复不能为空白")
@@ -296,7 +315,7 @@ def _prepare_display(draft,text,context,allowed):
     # need, not as a mandatory footer to every explanation.
     needs_choices=bool(draft.questions or draft.suggested_replies or context.get('plan_generation',{}).get('allowed')
                        or re.search(r'下一步|不确定|从哪|开始|继续|选题|研究现状|大家在做什么|可行|采用|采纳|太难|缩小',text))
-    if needs_choices and len(replies) + len(actions) < 2:
+    if needs_choices and not context.get("plan_generation", {}).get("allowed") and len(replies) + len(actions) < 2:
         for option in fallback_replies(text, context):
             if option.content not in {
                 r.content for r in replies

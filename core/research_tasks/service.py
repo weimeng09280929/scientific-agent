@@ -1050,6 +1050,7 @@ class ResearchTaskService:
                     "source_queries": candidate.get("queries") or [],
                     "relevance_reason": candidate.get("relevance_reason", ""),
                     "candidates_only": True,  # 候选文献不等于用户已阅读或认可
+                    "text_origin": "source_abstract",
                 },
                 source_stage="research",
             )

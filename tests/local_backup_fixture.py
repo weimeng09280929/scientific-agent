@@ -32,29 +32,39 @@ def app_at(root):
         from core.workspace.schema import GuideDraft
         from core.workspace.plans import rule_plan
         from core.invocation_audit import ACTIVE
-        state = install(api._CONFIG)
-        state.update(guidance_calls=0, fault=None)
-
-        def generate(registry, area, domain, text, context, purpose):
-            state["guidance_calls"] += 1
-            audit = ACTIVE.get()
-            ticket = audit.begin("network", "model", "offline-backup")
-            audit.finish(ticket, outcome="error" if state["fault"] else "ok")
-            if state["fault"] == "timeout":
-                raise TimeoutError("offline backup sample failure")
-            if state["fault"] == "structure":
-                from core.workspace.service import WorkspaceError
-                raise WorkspaceError("离线依据校验失败")
-            return rule_plan(context) if context.get("plan_generation", {}).get("allowed") else GuideDraft(reply="恢复副本离线回复，仍需用户核对。")
-
+        from core.llm import LLMRegistry
+        from core.research_tasks import sources
         import core.tools
-        from core.resource_limits import RESOURCES, ResourceLimits
-        from dataclasses import replace
-        with patch("web.workspace_api.generate_guidance", generate), \
-             patch.object(core.tools, "mineru_is_available", lambda: True), \
-             patch.object(core.tools, "parse_pdf_with_mineru", lambda *a: SimpleNamespace(mode="offline", sections=[], figures=[], tables=[], equations=[], references=[], title=None, full_text="Offline PDF text; no scientific result.")), \
-             patch.object(RESOURCES, "limits", replace(ResourceLimits(), heavy_user=1, heavy_global=2)):
-            yield api, state
+        import requests
+
+        # install() also serves standalone browser fixtures. Restore its
+        # process-wide substitutes when an in-process test exits.
+        with patch.object(LLMRegistry, "from_config", LLMRegistry.__dict__["from_config"]), \
+             patch.object(sources, "SOURCE_FUNCS", sources.SOURCE_FUNCS), \
+             patch.object(core.tools, "mineru_is_available", core.tools.mineru_is_available), \
+             patch.object(requests.sessions.Session, "request", requests.sessions.Session.request):
+            state = install(api._CONFIG)
+            state.update(guidance_calls=0, fault=None)
+
+            def generate(registry, area, domain, text, context, purpose):
+                state["guidance_calls"] += 1
+                audit = ACTIVE.get()
+                ticket = audit.begin("network", "model", "offline-backup")
+                audit.finish(ticket, outcome="error" if state["fault"] else "ok")
+                if state["fault"] == "timeout":
+                    raise TimeoutError("offline backup sample failure")
+                if state["fault"] == "structure":
+                    from core.workspace.service import WorkspaceError
+                    raise WorkspaceError("离线依据校验失败")
+                return rule_plan(context) if context.get("plan_generation", {}).get("allowed") else GuideDraft(reply="恢复副本离线回复，仍需用户核对。")
+
+            from core.resource_limits import RESOURCES, ResourceLimits
+            from dataclasses import replace
+            with patch("web.workspace_api.generate_guidance", generate), \
+                 patch.object(core.tools, "mineru_is_available", lambda: True), \
+                 patch.object(core.tools, "parse_pdf_with_mineru", lambda *a: SimpleNamespace(mode="offline", sections=[], figures=[], tables=[], equations=[], references=[], title=None, full_text="Offline PDF text; no scientific result.")), \
+                 patch.object(RESOURCES, "limits", replace(ResourceLimits(), heavy_user=1, heavy_global=2)):
+                yield api, state
 
 
 def login(client, index):

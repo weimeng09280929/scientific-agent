@@ -51,7 +51,7 @@ def error_details(exc):
         "retryable": category
         in {"rate_limited", "timeout", "proxy_error", "network", "server_error"},
         "retry_after_seconds": delay,
-        "error": f"{category}" + (f" (HTTP {code})" if code else ""),
+        "error": "当前入口未启用真实文献访问，请检查启动配置后手动重试" if category == "local_calls_disabled" else f"{category}" + (f" (HTTP {code})" if code else ""),
     }
 
 

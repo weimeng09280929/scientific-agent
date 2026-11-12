@@ -2553,6 +2553,7 @@
                 content.appendChild(el("div", { class: "list-empty" }, "暂无论文。可在上方导入已有资料，或返回科研对话明确请求检索；浏览不会自动启动任务。"));
                 return;
             }
+            content.appendChild(el("p",{class:"muted small"},"文献库可累计保存多次导入和检索的论文，没有固定 20 篇的总量上限。单次检索的候选处理上限与文献库总数不同。"));
             // 筛选工具栏（搜索/年份/期刊/排序），前端过滤
             content.appendChild(buildPaperFilterBar(papers));
 
@@ -2574,14 +2575,8 @@
                         card.scrollIntoView({ behavior: "smooth", block: "center" });
                         card.classList.add("paper-flash");
                         setTimeout(() => card.classList.remove("paper-flash"), 2600);
-                        // 自动展开详情
-                        if (!card.classList.contains("expanded")) {
-                            card.classList.add("expanded");
-                            if (!card.querySelector(".list-item-body")) {
-                                const p = papers.find(x => x.paper_id === targetId);
-                                if (p) card.appendChild(buildPaperBody(p));
-                            }
-                        }
+                        // Deep links share the same expansion state and controls.
+                        card.setPaperExpanded?.(true);
                         break;
                     }
                 }
@@ -3187,19 +3182,28 @@
         head.querySelectorAll('.badge-if-high,.badge-if-mid,.badge-if-low,.badge-cas-1,.badge-cas-2,.badge-cas-low,.ev-src-sciverse,.ev-entry-rel,.ev-entry-rel-mid,.ev-entry-rel-low').forEach(n=>n.remove());
         item.appendChild(head);
         item.appendChild(el('p',{class:'paper-relation'},p.ui_relation || p.relevance_reason || '与当前问题的关联尚待核对'));
-        item.appendChild(el('p',{class:'muted small'},'阅读范围：'+(p.reading_scope || (p.abstract?'摘要与元信息':'仅元信息'))+(p.parse_error?' · 解析未完成，请查看提示':'')));
+        const textLabel=p.text_label || '已有文本摘录（摘要来源未核实）';
+        item.appendChild(el('p',{class:'muted small'},'资料范围：'+(p.reading_scope || (p.abstract?textLabel:'仅元信息'))+(p.parse_error?' · 解析未完成，请查看提示':'')));
         const paperToggle=head.querySelector('.list-item-title');
-        paperToggle.setAttribute('role','button');paperToggle.tabIndex=0;paperToggle.setAttribute('aria-label','查看资料：'+(p.title||'无标题'));paperToggle.setAttribute('aria-expanded','false');
-        paperToggle.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();item.click();}};
-
-        item.addEventListener("click", () => {
-            const expanded = item.classList.toggle("expanded");
+        const toggleLabel=!p.abstract?'资料详情':/^(作者摘要|来源提供的摘要)$/.test(textLabel)?'摘要':textLabel==='模型生成摘要'?'模型摘要':'文本摘录';
+        const abstractToggle=el('button',{type:'button',class:'btn btn-sm paper-abstract-toggle',text:'展开'+toggleLabel});
+        head.appendChild(abstractToggle);
+        const syncPaperExpansion=expanded=>{
+            item.classList.toggle('expanded',expanded);
             paperToggle.setAttribute('aria-expanded',String(expanded));
-            if (expanded && !item.querySelector(".list-item-body")) {
-                const body = buildPaperBody(p);
-                item.appendChild(body);
-            }
-        });
+            abstractToggle.setAttribute('aria-expanded',String(expanded));
+            abstractToggle.textContent=(expanded?'收起':'展开')+toggleLabel;
+            let body=item.querySelector('.list-item-body');
+            if(expanded&&!body){body=buildPaperBody(p);item.appendChild(body);}
+            if(body){body.hidden=!expanded;body.style.display=expanded?'block':'none';}
+        };
+        item.setPaperExpanded=syncPaperExpansion;
+        paperToggle.setAttribute('role','button');paperToggle.tabIndex=0;paperToggle.setAttribute('aria-label','查看资料：'+(p.title||'无标题'));
+        paperToggle.setAttribute('aria-expanded','false');abstractToggle.setAttribute('aria-expanded','false');
+        const togglePaper=e=>{e.stopPropagation();syncPaperExpansion(!item.classList.contains('expanded'));};
+        abstractToggle.addEventListener('click',togglePaper);
+        paperToggle.addEventListener('click',togglePaper);
+        paperToggle.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();togglePaper(e);}};
         return item;
     }
 
@@ -3939,7 +3943,8 @@
                     <p>${linksHtml}</p>
                     ${p.reading_scope ? `<p>阅读范围：${escapeHtml(p.reading_scope)}</p>` : ''}
                     ${p.parse_error ? `<p class="ch-warning">解析提示：${escapeHtml(p.parse_error)}</p>` : ''}
-                    ${p.abstract ? `<div class="mt-8"><strong>${p.source_stage === "upload" ? "正文开头节选（非论文摘要）" : "摘要"}：</strong><br>${escapeHtml(p.abstract)}</div>` : '<p class="muted">仅元信息，没有可供阅读的摘要或正文。</p>'}
+                    ${p.pages_without_text ? `<p class="ch-warning">${Number(p.pages_without_text)} 页未提取到可用文字。</p>` : ''}
+                    ${p.abstract ? `<div class="mt-8"><strong>${escapeHtml(p.text_label || "已有文本摘录（摘要来源未核实）")}：</strong><br>${escapeHtml(p.abstract)}</div>` : '<p class="muted">没有已保存的文本预览。</p>'}
                     <details class="paper-technical"><summary>来源、版本与技术详情</summary><dl>
                         <dt>Paper ID</dt><dd class="mono">${escapeHtml(p.paper_id)}</dd>
                         <dt>作者</dt><dd>${escapeHtml((p.authors || []).join(", ") || "—")}</dd>

@@ -6,6 +6,7 @@ from uuid import uuid4
 from pydantic import Field, field_validator
 from core.workspace.schema import Contract, Area
 from core.workspace.plan_schema import PlanRequest
+from core.workspace.reading_session import PassageRequest, ReadingGuide
 
 GuidanceMode = Literal["beginner", "direct", "case"]
 EntryStage = Literal["orientation", "literature", "question", "design"]
@@ -58,6 +59,8 @@ class ConversationSend(Contract):
     selected_item_id: str | None = Field(default=None, max_length=200)
     selected_paper_ids: list[str] = Field(default_factory=list, max_length=3)
     plan_request: PlanRequest | None = None
+    reading_guide: ReadingGuide | None = None
+    passage: PassageRequest | None = None
     recovery_of: str | None = Field(default=None, max_length=128)  # Server-created round only.
     reading_purpose: Literal[
         "orientation", "method", "comparison", "innovation", "troubleshooting"

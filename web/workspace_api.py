@@ -141,6 +141,8 @@ def build_workspace_router(
             context["domain"] = project.domain
             context["domain_label"] = domain_label(project.domain)
             if config.dry_run:
+                if context.get("passage"):
+                    raise WorkspaceError("当前未启用模型，未处理选段，原文保留。")
                 return rule_guidance(area, text, context), "rules"
             registry = (
                 registry_factory()

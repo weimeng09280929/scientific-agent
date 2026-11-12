@@ -472,13 +472,14 @@ def test_arxiv_uses_https_without_implicit_redirect(monkeypatch):
 
 def test_plan_input_projection_keeps_conditions_and_linked_evidence_only():
     from core.workspace.guide import generate_guidance
-    from core.workspace.schema import GuideDraft
+    from core.workspace.plans import rule_plan
+    from tests.test_research_plan_templates import core_payload
 
     captured = []
 
     def structured_output(**payload):
         captured.append(payload)
-        return GuideDraft(reply="fixture")
+        return payload["output_schema"].model_validate(core_payload(rule_plan(context)))
 
     context = {
         "topic": "FL",
@@ -488,13 +489,17 @@ def test_plan_input_projection_keeps_conditions_and_linked_evidence_only():
         "history": [{"role": "user", "content": "比较两种方法"}],
         "plan_generation": {
             "allowed": True,
-            "question": {"item_id": "q", "paper_ids": ["p1"]},
+            "question": {"item_id": "q", "content": "在相同条件比较两种方法", "paper_ids": ["p1"]},
+            "method": "computational",
+            "supersedes_id": "old",
             "revision_target": {
                 "item_id": "old",
                 "title": "Old",
-                "plan": {"method": "computational"},
                 "plan_version": 1,
-                "content": "duplicate old plan",
+                # Use an actual document-sized duplicate, so the reduction
+                # assertion measures material projection rather than a tiny
+                # fixture being outweighed by current response preferences.
+                "content": "duplicate old plan\n" * 40,
             },
         },
         "papers": [
@@ -508,6 +513,7 @@ def test_plan_input_projection_keeps_conditions_and_linked_evidence_only():
         "existing_system": {"experiments": [{"result_summary": "old result"}]},
         "suggestions": [{"content": "unadopted draft"}],
     }
+    context["plan_generation"]["revision_target"]["plan"] = rule_plan(context).suggestions[0].plan.model_dump()
     generate_guidance(
         SimpleNamespace(structured_output=structured_output),
         "study",
@@ -530,5 +536,7 @@ def test_plan_input_projection_keeps_conditions_and_linked_evidence_only():
     )
     assert actual["records"] == [{"kind": "note", "content": "keep note"}]
     assert not {"existing_system", "suggestions"} & actual.keys()
-    assert "content" not in actual["plan_generation"]["revision_target"]
+    target = actual["plan_generation"]["revision_target"]
+    assert set(target) == {"title", "plan"}
+    assert {"sections", "conditions", "method_details", "unconfirmed"} == target["plan"].keys()
     assert len(json.dumps(actual)) < len(json.dumps(context))

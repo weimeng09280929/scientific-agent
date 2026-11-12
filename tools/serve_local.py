@@ -1,6 +1,7 @@
 """Explicit local profiles: legacy demo and isolated user accounts.
 
-Both bind loopback and disable live model/literature calls. No test papers are
+Both bind loopback; live models require explicit opt-in for the personal demo.
+Literature calls require a separate explicit opt-in. No test papers are
 injected into the user's historical projects.
 """
 from __future__ import annotations
@@ -54,17 +55,24 @@ def configure(mode: str, port: int, data_root: Path | None, registration: bool):
     return root
 
 
-def disable_live_calls():
+class LocalCallsDisabled(RuntimeError):
+    reason = "local_calls_disabled"
+    retry_after_seconds = None
+
+
+def disable_live_calls(*, allow_model=False, allow_sources=False):
     from core.llm import LLMRegistry
     from core.research_tasks import sources
     import requests
 
     def unavailable(*args, **kwargs):
-        raise RuntimeError("本地展示未启用真实模型或文献网络调用；已有资料和离线教学仍可查看")
+        raise LocalCallsDisabled("本地入口未启用此网络功能；请使用启用真实调用的启动方式")
 
-    LLMRegistry.from_config = classmethod(unavailable)
-    sources.SOURCE_FUNCS = {name: unavailable for name in sources.SOURCE_FUNCS}
-    requests.sessions.Session.request = unavailable
+    if not allow_model:
+        LLMRegistry.from_config = classmethod(unavailable)
+    if not allow_sources:
+        sources.SOURCE_FUNCS = {name: unavailable for name in sources.SOURCE_FUNCS}
+        requests.sessions.Session.request = unavailable
 
 
 def main():
@@ -73,13 +81,26 @@ def main():
     parser.add_argument("--port", type=int)
     parser.add_argument("--data-root", type=Path)
     parser.add_argument("--allow-registration", action="store_true")
+    parser.add_argument("--allow-live-model", action="store_true", help="Explicitly enable configured paid models for the personal demo; no extra experience cap")
+    parser.add_argument("--allow-live-sources", action="store_true", help="Enable real literature sources for the personal demo")
     args = parser.parse_args()
+    if (args.allow_live_model or args.allow_live_sources) and args.mode != "demo":
+        parser.error("真实账号体验请使用单独的费用保护入口；此选项仅用于自用 demo")
+    if args.allow_live_model:
+        from runtime.cli import _load_env
+        _load_env()
     port = args.port if args.port is not None else (8001 if args.mode == "demo" else 8077)
     configure(args.mode, port, args.data_root, args.allow_registration)
-    disable_live_calls()
+    if args.allow_live_model:
+        os.environ["SRA_DRY_RUN"] = "false"
+    disable_live_calls(allow_model=args.allow_live_model, allow_sources=args.allow_live_sources)
     from web.api import app
     import uvicorn
     print(f"Scientific Agent {args.mode}: http://127.0.0.1:{port}", flush=True)
+    if args.allow_live_model:
+        print("Configured live model enabled; no added experience cost cap; original request and concurrency guards retained", flush=True)
+    if args.allow_live_sources:
+        print("Live literature sources enabled; original source limits and explicit task confirmation retained", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=port, workers=1)
 
 

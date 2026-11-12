@@ -46,6 +46,13 @@ class LLMError(Exception):
     """LLM 调用错误。"""
 
 
+class LLMStructureError(LLMError):
+    """Bounded field paths/types only; never retain raw model text or values."""
+    def __init__(self, message, issues):
+        self.structure_issues = issues[:8]
+        super().__init__(message)
+
+
 class LLMTruncatedError(LLMError):
     """响应因输出预算耗尽而截断，不应误报为文献不足或普通 JSON 错误。"""
 
@@ -121,6 +128,7 @@ class StructuredOutputRequest:
     temperature: float = 0.0  # 结构化输出默认低温
     max_tokens: int = 4096
     extra: dict[str, Any] = field(default_factory=dict)
+    automatic_retry: bool = True
 
     def __post_init__(self) -> None:
         if self.prompt is None and self.messages is None:

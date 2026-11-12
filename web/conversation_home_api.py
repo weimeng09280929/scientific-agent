@@ -11,6 +11,7 @@ from core.research_scope import PUBLIC_DOMAINS
 from core.workspace.schema import Contract, now
 from core.workspace.start import ConversationStarter, StartConversation
 from core.workspace.conversations import ConversationNotFound, ConversationStorageError
+from core.workspace.paper_reading import PaperReadingTargetError, single_paper_target
 from core.workspace.service import WorkspaceError, RevisionConflict
 
 
@@ -23,6 +24,12 @@ class ProjectName(Contract):
         if not value.strip():
             raise ValueError("项目名称不能为空白")
         return value.strip()
+
+
+class ReadingTargetCheck(Contract):
+    project_id: str | None = Field(default=None, max_length=120)
+    content: str = Field(min_length=1, max_length=6000)
+    selected_paper_ids: list[str] = Field(default_factory=list, max_length=3)
 
 
 def build_home_router(configuration, require_project, register_project, owner_id=None):
@@ -65,6 +72,22 @@ def build_home_router(configuration, require_project, register_project, owner_id
             "max_stage": "design",
             "domains": [{"value": k, "label": v} for k, v in PUBLIC_DOMAINS.items()],
         }
+
+    @router.post("/conversations/reading-target")
+    def check_reading_target(request: ReadingTargetCheck):
+        # Used before an attachment is uploaded. No model, material or draft
+        # writes happen here. The message route resolves the target again.
+        from core.knowledge import KnowledgeStore
+
+        papers = []
+        if request.project_id:
+            require_project(request.project_id)
+            papers = KnowledgeStore(config().paths.project_db(request.project_id), read_only=True).list_papers()
+        try:
+            single_paper_target(papers, request.selected_paper_ids, request.content, pending_attachment=True)
+        except PaperReadingTargetError as exc:
+            raise HTTPException(422, detail={"code": "paper_reading_target", "message": str(exc)}) from exc
+        return {"ok": True}
 
     @router.post("/conversations/start")
     def start(request: StartConversation):

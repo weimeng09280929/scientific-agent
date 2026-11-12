@@ -132,13 +132,13 @@ class ConversationMover:
         for m in messages:
             data=json.loads(m['data'])
             linked_actions=any(a.get('item_id') or a.get('suggestion_id') or a.get('paper_ids') or a.get('type') not in ('start_search','open_settings','view_references') for a in data.get('actions',[]))
-            if linked_actions or any(data.get(k) for k in ('cited_paper_ids','suggestion_ids','research_task_id','report_citations','report_version')):
+            if linked_actions or any(data.get(k) for k in ('cited_paper_ids','suggestion_ids','research_task_id','report_citations','report_version','reading_materials')):
                 block('references','历史消息含论文引用、结构化操作或报告／草案关联，本版不能保持这些依据后移动。')
         for request in payload.get('sra_chat_requests',[]):
             if request['status'] not in ('completed','failed','cancelled'):
                 block('pending','存在正在执行或结果尚未确定的请求，请先按原请求恢复规则核对。')
             body=json.loads(request['payload'])
-            if body.get('selected_item_id') or body.get('selected_paper_ids') or body.get('plan_request'):
+            if any(body.get(key) for key in ('selected_item_id','selected_paper_ids','plan_request','reading_guide','passage')):
                 block('attachments','历史请求绑定论文、附件、正式材料或方案目标，本版不能同步移动。')
         audits=payload.get('sra_call_audit',[])
         audit_ids={a['id'] for a in audits}

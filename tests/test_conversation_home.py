@@ -3,7 +3,10 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from hashlib import sha256
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 import sqlite3
+import sys
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -11,6 +14,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from core.config import GlobalConfig, ProjectPaths
+from core import config
 from core.workspace.conversations import ConversationService
 from core.workspace.schema import Message
 from core.workspace.service import WorkspaceService
@@ -28,14 +32,19 @@ def tree(root):
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
+    monkeypatch.setenv("SRA_AUTH_MODE", "local")
+    monkeypatch.setenv("SRA_ACCOUNTS_DB", str(tmp_path / "unused-accounts.db"))
     monkeypatch.setenv("SRA_WEB_SKIP_GUARD", "1")
     monkeypatch.setenv("SRA_WEB_SKIP_PROJECT_SCAN", "1")
-    from web import api
-
     cfg = GlobalConfig(paths=ProjectPaths.from_root(tmp_path), dry_run=True)
-    monkeypatch.setattr(api, "_CONFIG", cfg)
-    monkeypatch.setattr(api, "_PROJECTS", {})
-    monkeypatch.setattr(api, "_METHOD_REGEN_JOBS", {})
+    monkeypatch.setattr(config, "_default_config", cfg)
+    # Load the real handlers in a private module so other fixtures can keep
+    # their own web.api module, account mode and router dependencies.
+    source = Path(__file__).resolve().parents[1] / "web" / "api.py"
+    spec = spec_from_file_location("web._conversation_home_test_api", source)
+    api = module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, api)
+    spec.loader.exec_module(api)
     app = FastAPI()
     app.include_router(
         build_home_router(cfg, api._require_project, api._register_conversation_project)

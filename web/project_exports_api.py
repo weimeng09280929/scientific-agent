@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Query
 from core.knowledge.store import StoreError
 from core.workspace.service import WorkspaceService, WorkspaceError
 from core.workspace.conversations import ConversationService, ConversationNotFound
-from core.workspace.plans import METHODS
+from core.workspace.plans import METHODS, render_plan_evidence
 
 
 def artifact_text(artifact, root):
@@ -411,6 +411,8 @@ def build_exports_router(
         content = f"# {item.title}\n\n项目：{project_id}\n\n记录：{item.item_id} · 材料版本：{w.revision}\n\n状态：{status}；{item.status}；需要复核：{item.needs_review}\n\n> 方案保存不代表实验已执行或结论得到验证。原文中的草稿、教学、预期与历史标记均保留。\n\n{item.content}\n\n关联记录：{'、'.join(item.related_ids)}\n\n引用论文：{'、'.join(item.paper_ids)}"
         if item.kind == "plan":
             content = plan_identity(state, w, item) + "\n\n" + content
+            if evidence := render_plan_evidence(item.plan):
+                content += "\n\n" + evidence
         if item.source_ref:
             content += "\n\n来源：" + item.source_ref.model_dump_json()
         from core.workspace.teaching import export_header
@@ -434,12 +436,14 @@ def build_exports_router(
         text = f"项目名称：{name}\n\n研究问题：" + "；".join(
             q.title + "：" + q.content for q in questions
         )
-        text += f"\n\n方案类型：{METHODS[item.plan.method] if item.plan else '历史未标注'}；版本：{item.plan_version if item.plan_version is not None else '讨论稿，尚无正式版本' if draft else '历史未标版'}；修订自：{item.supersedes_id or '无'}"
+        text += f"\n\n方案类型：{METHODS[item.plan.method] if item.plan else '历史未标注'}；版本：{item.plan_version if item.plan_version is not None else '讨论稿，尚无正式版本' if draft else '历史未标版'}；替代的正式方案：{item.supersedes_id or '无'}"
         if item.plan:
             text += (
                 f"\n\n模板版本：{item.plan.template_version}\n\n待确认："
                 + "；".join(item.plan.unconfirmed)
             )
+            if item.plan.revised_from_draft_id:
+                text += "\n\n修订来源草案：" + item.plan.revised_from_draft_id
         papers = {p.paper_id: p for p in service_papers(state.project_id)}
         for pid in item.paper_ids:
             p = papers.get(pid)
@@ -505,6 +509,8 @@ def build_exports_router(
             + "\n\n"
             + s["content"]
         )
+        if evidence := render_plan_evidence(item.plan):
+            content += "\n\n" + evidence
         from core.workspace.teaching import export_header
 
         content = export_header(chat) + content

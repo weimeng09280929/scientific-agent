@@ -8,6 +8,7 @@ from core.research_tasks.detect import classify_search_request
 from core.research_tasks.service import TaskConflict as _TaskConflict
 from core.research_tasks.service import TaskError as _TaskError
 from core.research_tasks.service import TaskNotFound as _TaskNotFound
+from core.workspace.paper_reading import PaperReadingTargetError, single_paper_target
 from core.workspace.service import WorkspaceError, RevisionConflict
 from core.workspace.conversations import (
     ConversationService,
@@ -60,6 +61,8 @@ def build_conversation_router(config, require_project, generator, task_starter=N
         if isinstance(exc,ConversationMoved):
             from web.conversation_move_api import moved_error
             moved_error(exc,config.paths,require_project)
+        if isinstance(exc, PaperReadingTargetError):
+            raise HTTPException(422, detail={"code": "paper_reading_target", "message": str(exc)}) from exc
         raise HTTPException(
             status_code=(
                 503
@@ -177,6 +180,8 @@ def build_conversation_router(config, require_project, generator, task_starter=N
             from core.workspace.teaching import teaching_identity, TeachingService
 
             if teaching_identity(s):
+                if request.passage or request.reading_guide:
+                    raise WorkspaceError("教学案例暂未开放论文伴读与选段处理。")
                 return result_response(
                     TeachingService(s).free(conversation_id, request)
                 )
@@ -185,11 +190,14 @@ def build_conversation_router(config, require_project, generator, task_starter=N
 
             if (
                 task_starter is not None
+                and not (request.passage or request.reading_guide)
                 and requested(request.content, request.plan_request) is None
             ):
                 # 只识别明确的检索授权；普通问答、阅读材料、页面操作照常走讨论。
                 intent = classify_search_request(request.content)
-                if intent.is_search:
+                if intent.is_search and not single_paper_target(
+                    s.shared.store.list_papers(), request.selected_paper_ids, request.content
+                ):
                     return result_response(
                         task_starter(project, conversation_id, request, intent)
                     )
@@ -204,6 +212,14 @@ def build_conversation_router(config, require_project, generator, task_starter=N
         s, _ = service(project_id)
         try:
             return s.request_view(conversation_id, request_id)
+        except WorkspaceError as exc:
+            fail(exc)
+
+    @router.post("/{project_id}/conversations/{conversation_id}/requests/{request_id}/cancel-passage")
+    def cancel_passage(project_id: str, conversation_id: str, request_id: str):
+        s, _ = service(project_id)
+        try:
+            return s.cancel_passage(conversation_id, request_id)
         except WorkspaceError as exc:
             fail(exc)
 
@@ -291,9 +307,7 @@ def build_conversation_router(config, require_project, generator, task_starter=N
     ):
         s, _ = service(project_id)
         try:
-            return {
-                "actions": s.guidance_actions(conversation_id, message_ids.split(","))
-            }
+            return s.guidance_actions(conversation_id, message_ids.split(","))
         except WorkspaceError as exc:
             fail(exc)
 

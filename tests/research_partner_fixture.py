@@ -28,10 +28,16 @@ def application(root):
                 audit=ACTIVE.get();ticket=audit.begin('network','model','offline-role-spy') if audit else None
                 try:
                     if 'result' in control:
-                        value=control['result'];return value(ctx,text) if callable(value) else value
-                    if ctx.get('plan_generation',{}).get('allowed'):
-                        draft=rule_plan(ctx);return draft.model_copy(update={'reply':'【离线结构样例】这是方法讨论稿，尚未采纳；仅验收生成与采纳链路，不是真实模型质量证据。'})
-                    return GuideDraft(reply='【离线占位回复】仅验证规则与上下文传递，不评价真实模型教学质量。')
+                        value=control['result'];result=value(ctx,text) if callable(value) else value
+                    elif ctx.get('plan_generation',{}).get('allowed'):
+                        result=rule_plan(ctx)
+                    else:
+                        result=GuideDraft(reply='【离线占位回复】仅验证规则与上下文传递，不评价真实模型教学质量。')
+                    from core.workspace.plan_generation import PlanOutput
+                    if issubclass(kw['output_schema'],PlanOutput):
+                        from tests.test_research_plan_templates import core_payload
+                        return kw['output_schema'].model_validate(core_payload(result))
+                    return result
                 finally:
                     if audit:audit.finish(ticket,outcome='ok')
         # The normal website factory calls this actual generate_guidance; no

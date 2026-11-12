@@ -508,17 +508,23 @@ class WorkspaceService:
         return self.load()
 
     def paper_summaries(self) -> list[dict]:
+        from core.knowledge.paper_text import preview_label, preview_origin
+        from core.workspace.reading_session import PREVIEW_LIMIT, preview_version
+
         return [
             {
                 "paper_id": p.paper_id,
                 "title": p.title,
                 "year": p.year,
                 "authors": p.authors,
-                "abstract": (p.abstract or "")[:1800],
+                "abstract": (p.abstract or "")[:PREVIEW_LIMIT],
+                "preview_version": preview_version(p) if p.abstract and preview_origin(p) != "generated_summary" else None,
                 "doi": p.doi,
                 "url": p.url,
-                "scope": "有摘要，未在工作台确认全文" if p.abstract else "仅元信息",
+                "scope": (preview_label(p) + "，未在工作台确认全文") if preview_label(p) else "仅元信息",
+                "text_label": preview_label(p),
                 "reading_scope": p.metadata.get("reading_scope"),
+                "pages_without_text": p.metadata.get("pages_without_text"),
                 "relevance": p.metadata.get("relevance", ""),
                 "teaching": bool(p.metadata.get("teaching")),
             }
@@ -627,9 +633,13 @@ class WorkspaceService:
                     ]
                 )
                 if item.plan:
+                    from core.workspace.plans import render_plan_evidence
+
                     lines.append(
                         f"方案类型：{item.plan.method}；模板：{item.plan.template_version}；关联问题：{item.plan.question_id}"
                     )
+                    if evidence := render_plan_evidence(item.plan):
+                        lines.extend(["", evidence])
             if item.result_status:
                 lines.extend(
                     [

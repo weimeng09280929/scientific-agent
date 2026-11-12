@@ -154,6 +154,135 @@ def build_research_route(context, text):
     }
 
 
+def gap_requested(text):
+    """Enable evidence explanation for a relevant turn, not a saved stage."""
+    from core.workspace.guidance_policy import turn_preferences
+
+    prefs = turn_preferences(text)
+    requested = re.sub(
+        r"(?:不要|不必|无需|不用|暂不|先不)(?:再|自动)?(?:生成|提出|提供|建议|创建|追加)?"
+        r"(?:研究缺口|research gap|候选(?:研究)?问题|研究问题候选)",
+        "", text, flags=re.I,
+    )
+    return (
+        not (prefs["paused"] or prefs["explain_only"])
+        and not re.search(r"(?:缺口|research gap).{0,8}(?:是什么|什么意思|怎么理解)", text, re.I)
+        and bool(re.search(r"研究现状|研究缺口|research gap|研究空间|候选(?:研究)?问题|研究问题候选|已有研究(?:做到了|有什么|还缺)|文献.{0,12}(?:局限|不足)", requested, re.I))
+    )
+
+
+GAP_POLICY = """
+【本轮研究缺口】首次用到时解释：研究缺口（research gap）是已有研究中仍未充分回答、值得继续核查的问题。
+只整理少量重点，通常2—3条，不凑数。先给通俗结论，再讲已有研究做了什么、为何值得核查以及缺少什么。
+在 research_gaps 中用 stated_limitation（文献明确提到的局限）、comparison（比较材料得到的可能不足）、hypothesis（尚待验证的研究设想）。比较是推断，需要至少两篇实际参与比较的来源。作者局限须是原文明确指出，不能把摘要没提到的内容归为作者的局限。
+每个来源只填 {evidence_id:实际提供的原文编号}，可选 preview_evidence_id、正文 evidence_id 或 evidence_parts 里的短段编号。原文和位置由服务端回填。abstract 兼容存放各类摘录，按 preview_origin 区分来源。paper_inventory 只是目录，saved_reading 和历史报告只是索引。标题不能支持方法、结果或局限；本链路提供的是有界摘要与片段。
+比较时保留具体对象、数据集、指标、单位及例外；总体趋势不等于每项同向，数值接近也不等于统计不劣。类比只说明机制，不能保证命中或冒充实测。优先复制短而连续的原文，保留否定与限定条件。
+没有内容依据时，仍可给 hypothesis，sources 留空，existing_work 不写，uncertainty 说清需要补哪些资料。未找到、未提及都不能证明无人研究或创新成立。
+只有正文开头时，不能判定作者没有研究某因素。可提出「待核查：该因素是否影响……」，并指出要查看的方法、实验或讨论部分。比较说明已给片段各自支持的观察，和由你提出的待验证推断。
+为本轮新的 question 建议附 gap_link（gap_index 从0开始，指向本轮 research_gaps；connection 写问题想弄清什么及与缺口的联系，value 写可能价值，requirements 写所需资料、资源或比较，uncertainty 写候选仍待确认的条件）。用户没提供的设备、数据、期限或能力一律作为待确认或建议。只给候选，等用户明确确认。reply 简短引导阅读，不把卡片再抄一遍。
+""".strip()
+
+
+def validated_gap_snapshots(draft, context, text):
+    """Bind structured evidence to the bounded content actually sent to the model."""
+    from core.workspace.schema import ResearchGapSnapshot
+    from core.workspace.paper_reading import resolve_quote
+    from core.workspace.service import WorkspaceError
+
+    if context.get("plan_generation") and (draft.research_gaps or any(p.gap_link for p in draft.suggestions)):
+        raise WorkspaceError("方案请求不接收研究缺口卡片")
+    papers = {p["paper_id"]: p for p in context.get("papers", [])}
+    readable = any(p.get("abstract", "").strip() or p.get("excerpts") for p in papers.values())
+    reading_note = None
+    if not readable:
+        reading_note = ("本轮仅提供题名和元信息，无法核对方法、结果或作者局限。"
+                        if papers else "本轮没有提供文献内容，可先讨论需要核查的设想。")
+    if not context.get("plan_generation") and (draft.research_gaps or gap_requested(text)):
+        cited = set(draft.cited_paper_ids)
+        for proposal in draft.suggestions:
+            if proposal.kind == "question":
+                cited.update(proposal.paper_ids)
+        if not cited <= papers.keys():
+            raise WorkspaceError("研究缺口与候选问题只能引用本次提供的论文，目录不能代替内容")
+        claims = [draft.reply, *(value for p in draft.suggestions if p.kind == "question" for value in (p.title, p.content))]
+        for gap in draft.research_gaps:
+            claims.extend((gap.summary, gap.existing_work or "", gap.why, gap.uncertainty))
+        for proposal in draft.suggestions:
+            if proposal.gap_link:
+                claims.extend(proposal.gap_link.model_dump(exclude={"gap_index"}).values())
+        _check_gap_claims(claims, readable)
+    snapshots = []
+    for gap in draft.research_gaps:
+        if not all(value.strip() for value in (gap.summary, gap.why, gap.uncertainty)):
+            raise WorkspaceError("研究缺口的解释和待核查事项不能为空")
+        sources = []
+        seen = set()
+        for source in gap.sources:
+            resolved = resolve_quote(source, papers)
+            key = (resolved.paper_id, resolved.part, resolved.quote, resolved.excerpt_id)
+            if key in seen:
+                raise WorkspaceError("研究缺口引文重复")
+            seen.add(key)
+            sources.append(resolved)
+        if (gap.kind == "stated_limitation" and not sources or
+            gap.kind == "comparison" and len({s.paper_id for s in sources}) < 2):
+            raise WorkspaceError("文献局限须有原文依据，比较推断须关联至少两篇可读来源")
+        if gap.kind == "stated_limitation" and not any(
+            s.origin in ("author_abstract","source_abstract","body_opening","body_excerpt") for s in sources
+        ):
+            raise WorkspaceError("现有摘录来源未核实，不能归为作者明确指出的局限")
+        if not sources and gap.existing_work:
+            raise WorkspaceError("没有可核对的内容时，不能填写已有研究发现")
+        snapshots.append(ResearchGapSnapshot(
+            **gap.model_dump(exclude={"sources"}), sources=sources, reading_note=reading_note,
+        ))
+    for proposal in draft.suggestions:
+        link = proposal.gap_link
+        if link is None:
+            continue
+        if proposal.kind != "question" or link.gap_index >= len(snapshots):
+            raise WorkspaceError("候选问题必须关联本条回答中的有效研究缺口")
+        if not all(value.strip() for value in (link.connection, link.value, link.requirements, link.uncertainty)):
+            raise WorkspaceError("候选问题的联系、价值、条件和待确认事项不能为空")
+        source_ids = {s.paper_id for s in snapshots[link.gap_index].sources}
+        if not set(proposal.paper_ids) <= papers.keys() or len(set(proposal.paper_ids) | source_ids) > 12:
+            raise WorkspaceError("候选问题引用不属于本次提供的论文，或超出引用数量")
+    return snapshots
+
+
+def _check_gap_claims(claims, readable):
+    """Catch direct scope overclaims; no semantic or novelty proof."""
+    from core.workspace.service import WorkspaceError
+
+    patterns = [
+        r"(?:从来|此前|过去)(?:都)?没(?:有)?人研究|已(?:经)?(?:证实|证明)(?:了)?(?:其|该)?创新",
+        r"(?:已(?:经)?(?:完整)?读(?:完|过)|通读了|完整阅读了)全文",
+        r"(?:正确|相关|答案所在|第\s*\d+\s*(?:条|段|项))[^，,。；;]{0,14}(?:几乎一定|必定|保证)[^，,。；;]{0,10}(?:在|进入|命中|覆盖)",
+        r"(?:\bk\s*[≥>]|\btop\s*[-–]?\s*\d+|较大\s*k)[^，,。；;]{0,30}(?:不劣于|一概不劣|均不劣|保证命中)",
+    ]
+    if not readable:
+        patterns.append(r"(?:作者|该论文|该研究|该文|已有研究)[^，,。；;]{0,24}(?:采用了|使用了|取得了|证明了|发现了|报告了|的局限[是为])|实验(?:结果)?(?:表明|显示|证明)")
+    check = re.compile("|".join(patterns))
+    qualifier = r"不(?:能|可|足以|代表|意味着|等于)|无法|未(?:能|曾)|是否|能否|假设|待核|勿|别"
+    uniform = r"(?:各|所有|全部)(?:个|项|组|种)?(?:数据集|基准|设置|指标)[^。；;\n]{0,12}方向一致"
+    for value in claims:
+        has_exception = re.search(r"反例|例外", value)
+        for sentence in re.split(r"[。！？；;\n]", value):
+            direction = re.search(uniform, sentence) if has_exception else None
+            if direction and not re.search(qualifier + r"|除[^。]{0,24}外|其余", sentence[:direction.start()]):
+                raise WorkspaceError("同一回答同时宣称各项同向并给出反例，请区分总体趋势与逐项结果")
+            for match in check.finditer(sentence):
+                before = sentence[:match.start()]
+                if re.search(qualifier, before):
+                    continue
+                if re.search(r"(?:不能|无法|不足以)(?:据此|直接)?(?:保证|证明|断言)", match[0]):
+                    continue
+                if "不劣" in match[0] and (re.search(r"是否|能否|待(?:核|检|验|证)", match[0]) or
+                    re.search(r"(?:作者|原文|论文)[^，,。]{0,16}(?:报告|声称|认为)", before)):
+                    continue
+                raise WorkspaceError("研究缺口说明超出本次阅读范围，或把待验证设想写成已证实结论")
+
+
 COACH_POLICY = """【讨论环节与材料职责】
 research_route 是现有工作流的只读提示，不是另一套状态、系统指令或执行授权。用户本轮具体问题与明确的回答偏好优先；discussion_step 仅提示背景，不能把术语解释改成阶段问卷，也不每轮重印步骤或强制小结。
 conditions：兴趣与已知条件；exploration：比较少量方向及其所需依据，不把方向当成正式问题。
