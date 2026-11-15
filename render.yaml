@@ -1,20 +1,72 @@
-# Render Blueprint — 科研论文 Agent 系统后端
-# 在 Render 新建 Blueprint 时选择本仓库，或在 Dashboard -> New -> Blueprint 填入本文件路径
+# Render Blueprint — 科研论文 Agent 系统（公网部署）
+#
+# 使用方式：
+#   1. 将仓库推送到 GitHub；
+#   2. Render Dashboard -> New -> Blueprint，选择本仓库；
+#   3. 在创建页面填写 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL 等标记为 sync:false 的变量；
+#   4. 首次部署完成后，在 Render Shell 中创建登录账号（见下方注释）。
+#
+# 说明：
+#   - 持久磁盘用于保存 SQLite（accounts.db、projects/*/knowledge.db）、
+#     artifacts、snapshots 与向量库；
+#   - 免费实例不支持持久磁盘，因此使用 starter 及以上 plan；
+#   - 服务为单进程，符合项目单实例锁与 SQLite 写模型。
 services:
   - type: web
     name: scientific-research-agent
     runtime: python
-    plan: free
+    plan: starter
+    region: singapore
+    autoDeploy: true
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m web.api
+    # 启动前初始化账号库（幂等）；随后由 web.api 读取 $PORT 并绑定 0.0.0.0
+    startCommand: 'mkdir -p "$SRA_PROJECTS_DIR" && python -m tools.local_accounts --db "$SRA_ACCOUNTS_DB" init && python -m web.api'
+    healthCheckPath: /
+    disk:
+      name: sra-data
+      mountPath: /var/data
+      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
-      # 端口：web/api.py 自动回落到 Render 注入的 $PORT，无需配置 SRA_WEB_PORT
-      # 真实密钥请到 Render Dashboard -> 本服务 -> Environment 配置（不在 yaml 里提交）
-      # - key: MINIMAX_API_KEY
-      #   sync: false
-      # - key: MINIMAX_BASE_URL
-      #   value: https://api.minimaxi.com/v1
-      # - key: SCIVERSE_API_TOKEN
-      #   sync: false
+        value: 3.11.9
+
+      # ===== 运行模式：公网账号模式 =====
+      - key: SRA_AUTH_MODE
+        value: accounts
+      - key: SRA_WEB_HOST
+        value: 0.0.0.0
+      - key: SRA_DRY_RUN
+        value: "false"
+      # 公网不开放自助注册；账号通过 Render Shell 预置
+      - key: SRA_ALLOW_LOCAL_REGISTRATION
+        value: "0"
+
+      # ===== 持久化路径（必须与上面的 mountPath 一致）=====
+      - key: SRA_DATA_ROOT
+        value: /var/data
+      - key: SRA_PROJECTS_DIR
+        value: /var/data/projects
+      - key: SRA_ACCOUNTS_DB
+        value: /var/data/accounts.db
+      - key: SRA_TASKS_CONFIG_PATH
+        value: config/tasks.yaml
+
+      # ===== 模型凭据：在 Render 创建服务时填写 =====
+      # 当前 tasks.yaml 使用 deepseek provider + deepseek-v4.1-flash-1017，
+      # DEEPSEEK_BASE_URL 必须指向实际可用的 OpenAI 兼容网关。
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_BASE_URL
+        sync: false
+      # 可选：语义向量检索（不配置时知识库仍可用关键词/结构检索）
+      - key: OPENAI_API_KEY
+        sync: false
+      # 可选：文献检索与 PDF 解析
+      - key: SCIVERSE_API_TOKEN
+        sync: false
+      - key: MINERU_API_KEY
+        sync: false
+
+# 首次部署后创建登录账号（Render Dashboard -> 服务 -> Shell）：
+#   python -m tools.local_accounts --db "$SRA_ACCOUNTS_DB" create you@example.com
+# 按提示输入两次密码。创建后无需重启，直接访问站点登录即可。
