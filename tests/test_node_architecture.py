@@ -1,4 +1,4 @@
-"""43 节点架构契约与节点间通信完整性测试。
+"""41 节点架构契约与节点间通信完整性测试。
 
 直接回答评委的两个核心疑问：
 
@@ -57,7 +57,7 @@ EXPECTED_NODE_COUNTS = {
     "research": 10,
     "ideation": 5,
     "design": 6,
-    "experiment": 9,
+    "experiment": 7,
     "writing": 7,
     "discovery": 6,
 }
@@ -118,10 +118,10 @@ def _static_reads_writes(node_cls) -> tuple[set[str], set[str]]:
 
 
 def test_total_nodes_equal_43():
-    """六阶段节点总数应精确等于 43。"""
+    """六阶段节点总数应精确等于 41。"""
     total = sum(len(g.nodes) for g in _all_graphs().values())
-    assert total == 43, (
-        f"六阶段节点总数应为 43，实际 {total}。"
+    assert total == 41, (
+        f"六阶段节点总数应为 41，实际 {total}。"
         f"若节点数变化，请同步更新 docs/node_architecture.md 的节点清单。"
     )
 
@@ -137,9 +137,9 @@ def test_each_stage_node_count(stage):
 
 
 def test_node_kind_distribution():
-    """节点类别分布：30 agent / 6 checkpoint / 5 human / 2 tool。"""
+    """节点类别分布：28 agent / 6 checkpoint / 5 human / 2 tool。"""
     counter = Counter(_node_kind(node) for _, _, node in _all_nodes())
-    assert counter["agent"] == 30, f"AgentNode 应为 30，实际 {counter['agent']}"
+    assert counter["agent"] == 28, f"AgentNode 应为 28，实际 {counter['agent']}"
     assert counter["checkpoint"] == 6, f"CheckpointNode 应为 6，实际 {counter['checkpoint']}"
     assert counter["human"] == 5, f"HumanNode 应为 5，实际 {counter['human']}"
     assert counter["tool"] == 2, f"ToolNode 应为 2，实际 {counter['tool']}"

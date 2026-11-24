@@ -18,10 +18,13 @@ from urllib.parse import quote_plus
 
 import requests
 
+from core.tools.http import http_get
+from core.tools.search_result import SearchResults
+
 logger = logging.getLogger(__name__)
 
 # arxiv API endpoint
-_ARXIV_API = "http://export.arxiv.org/api/query"
+_ARXIV_API = "https://export.arxiv.org/api/query"
 _ARXIV_NS = {"atom": "http://www.w3.org/2005/Atom"}
 
 
@@ -145,16 +148,26 @@ def search_arxiv(
     }
 
     try:
-        resp = requests.get(_ARXIV_API, params=params, timeout=timeout)
+        resp = http_get(_ARXIV_API, params=params, timeout=timeout)
         resp.raise_for_status()
     except requests.RequestException as e:
         logger.warning("arxiv 检索失败（query=%r）: %s", query, e)
-        return []
+        return SearchResults.failure(e)
 
     # arxiv 建议每秒不超过 1 个请求
     time.sleep(0.5)
 
-    papers = _parse_arxiv_response(resp.text, source_subquery=source_subquery)
+    try:
+        root = ET.fromstring(resp.text)
+        if root.tag != "{http://www.w3.org/2005/Atom}feed":
+            raise ValueError("Unexpected arXiv response root")
+        entries = root.findall("atom:entry", _ARXIV_NS)
+        if any((e.findtext("atom:title", "", _ARXIV_NS) or "").strip().lower() == "error" for e in entries):
+            raise ValueError("arXiv returned an API error feed")
+        papers = _parse_arxiv_response(resp.text, source_subquery=source_subquery)
+        errors = len(entries)-len(papers)
+    except (ET.ParseError, ValueError, TypeError) as exc:
+        return SearchResults.failure(exc,resp)
     # 客户端兜底：API 过滤偶尔不可靠（如部分镜像），再按年份硬过滤一遍
     if (year_from is not None or year_to is not None) and papers:
         papers = [
@@ -162,7 +175,7 @@ def search_arxiv(
             if (year_from is None or (p.year or 0) >= year_from)
             and (year_to is None or (p.year or 9999) <= year_to)
         ]
-    return papers
+    return SearchResults(papers, response=resp, raw_count=len(entries), parse_errors=errors)
 
 
 def _parse_arxiv_response(xml_text: str, source_subquery: str = "") -> list[ArxivPaper]:
@@ -188,6 +201,8 @@ def _parse_arxiv_response(xml_text: str, source_subquery: str = "") -> list[Arxi
             arxiv_id = _extract_arxiv_id(id_url)
             title = " ".join((title_elem.text or "").split()) if title_elem is not None else ""
             abstract = " ".join((summary_elem.text or "").split()) if summary_elem is not None else ""
+            if not arxiv_id or not title:
+                continue
             published = published_elem.text.strip() if published_elem is not None and published_elem.text else None
 
             authors: list[str] = []

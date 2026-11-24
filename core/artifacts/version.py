@@ -37,13 +37,16 @@ class ArtifactVersionError(Exception):
 class ArtifactContentStore:
     """产出物内容文件存储。"""
 
-    def __init__(self, artifacts_dir: Path):
+    def __init__(self, artifacts_dir: Path, *, read_only=False):
         self._root = artifacts_dir
-        self._root.mkdir(parents=True, exist_ok=True)
+        self._read_only = read_only
+        if not read_only:
+            self._root.mkdir(parents=True, exist_ok=True)
 
     def group_dir(self, artifact_group: EntityId) -> Path:
         d = self._root / artifact_group
-        d.mkdir(parents=True, exist_ok=True)
+        if not self._read_only:
+            d.mkdir(parents=True, exist_ok=True)
         return d
 
     def write_text_content(
@@ -243,6 +246,20 @@ class ArtifactManager:
 
     # ===== 查询 =====
 
+    def list_artifacts(self, artifact_type: Optional["ArtifactType"] = None) -> list[Artifact]:
+        """按类型列出 Artifact（每个 artifact_group 取最新版本）。
+
+        api 层的下载/展示都走这里；此前该方法缺失导致方法文档/论文稿
+        永远显示「暂无」（调用即 AttributeError 被 except 吞掉）。
+        """
+        all_artifacts = self._store.list_artifacts(artifact_type=artifact_type)
+        latest_by_group: dict[str, Artifact] = {}
+        for a in all_artifacts:
+            current = latest_by_group.get(a.artifact_group)
+            if current is None or a.version > current.version:
+                latest_by_group[a.artifact_group] = a
+        return sorted(latest_by_group.values(), key=lambda a: a.created_at)
+
     def get(self, artifact_id: EntityId) -> Artifact:
         return self._store.get_artifact(artifact_id)
 
@@ -260,7 +277,8 @@ class ArtifactManager:
         if artifact.content is not None:
             return artifact.content
         if artifact.content_path:
-            path = Path(artifact.content_path)
-            if path.exists():
+            from core.storage_paths import project_file
+            path = project_file(artifact.content_path, self._content._root.parent)
+            if path.is_relative_to(self._content._root.resolve()) and path.is_file():
                 return path.read_text(encoding="utf-8")
         return None

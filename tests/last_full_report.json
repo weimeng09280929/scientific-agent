@@ -1,42 +1,42 @@
 {
-  "generated_at": "2026-08-08T12:08:57.759533",
-  "total_elapsed": 56.15800333023071,
+  "generated_at": "2026-10-16T21:35:02.886030",
+  "total_elapsed": 73.82109642028809,
   "validators": [
     {
       "name": "架构质量",
-      "status": "fail",
-      "exit_code": 1,
-      "elapsed": 0.9097635746002197
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed": 8.443934202194214
     },
     {
       "name": "流水线",
       "status": "pass",
       "exit_code": 0,
-      "elapsed": 10.88874363899231
+      "elapsed": 16.386343240737915
     },
     {
       "name": "产出质量",
       "status": "pass",
       "exit_code": 0,
-      "elapsed": 6.46176815032959
+      "elapsed": 7.767488479614258
     },
     {
-      "name": "赛题对齐",
+      "name": "历史赛题检查（非获奖预测）",
       "status": "pass",
       "exit_code": 0,
-      "elapsed": 37.8726282119751
+      "elapsed": 39.58927369117737
     },
     {
       "name": "API 接口",
-      "status": "fail",
-      "exit_code": 1,
-      "elapsed": 0.003604412078857422
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed": 1.5899627208709717
     }
   ],
   "summary": {
     "total": 5,
-    "passed": 3,
-    "failed": 2,
+    "passed": 5,
+    "failed": 0,
     "errors": 0
   }
 }

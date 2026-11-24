@@ -137,15 +137,15 @@ def test_design_graph_has_6_nodes():
     assert graph.exit_node == "method_artifact"
 
 
-def test_experiment_graph_has_9_nodes():
-    """experiment 图应有 9 个节点。
+def test_experiment_graph_has_7_nodes():
+    """experiment 图应有 7 个节点。
 
-    拓扑：experiment_config → code_generate → code_review → cp_before_run
-    → experiment_review → experiment_run → anomaly_check → claim_verify
-    → experiment_outcome_assess。
+    拓扑：experiment_config → cp_before_run → experiment_review
+    → experiment_run → anomaly_check → claim_verify → experiment_outcome_assess。
+    （实验只交付任务不交付代码：code_generate/code_review 已移除）
     """
     graph = build_experiment_graph()
-    assert len(graph.nodes) == 9
+    assert len(graph.nodes) == 7
     assert graph.entry_node == "experiment_config"
     assert graph.exit_node == "experiment_outcome_assess"
 

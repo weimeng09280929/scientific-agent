@@ -73,7 +73,7 @@ VALIDATORS = [
     ("架构质量", "validate_arch"),
     ("流水线", "validate_pipeline"),
     ("产出质量", "validate_outputs"),
-    ("赛题对齐", "validate_competition"),
+    ("历史赛题检查（非获奖预测）", "validate_competition"),
     ("API 接口", "validate_api"),
 ]
 
@@ -151,24 +151,7 @@ def _print_summary(results: list[dict], elapsed_total: float) -> None:
     color = C.GREEN if pct >= 80 else C.YELLOW if pct >= 60 else C.RED
     print(f"  通过：{C.GREEN}{pass_count}{C.RESET} / {len(results)}  ({color}{pct:.0f}%{C.RESET})")
 
-    # 评级
-    if pct >= 90:
-        grade = "S 级 — 冠军候选"
-        color = C.GREEN
-    elif pct >= 80:
-        grade = "A 级 — 强竞争力"
-        color = C.GREEN
-    elif pct >= 70:
-        grade = "B 级 — 良好"
-        color = C.YELLOW
-    elif pct >= 60:
-        grade = "C 级 — 合格"
-        color = C.YELLOW
-    else:
-        grade = "D 级 — 需改进"
-        color = C.RED
-
-    print(f"\n  {C.BOLD}总体评级：{color}{grade}{C.RESET}\n")
+    print("\n  本报告仅反映自动检查结果，不代表科研结论、上线安全认证或比赛获奖预测。\n")
 
 
 def _save_json_report(results: list[dict], elapsed_total: float) -> Path:
@@ -210,7 +193,7 @@ def main() -> int:
     _set_color(not args.no_color)
 
     print(f"\n{C.BOLD}{'='*70}")
-    print(f"  自动化验证总入口（GOAI 赛道三·方向三备战）")
+    print(f"  自动化验证总入口（含历史专项检查）")
     print(f"{'='*70}{C.RESET}\n")
 
     validators = VALIDATORS

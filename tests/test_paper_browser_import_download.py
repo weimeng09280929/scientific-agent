@@ -39,16 +39,26 @@ def test_imported_arxiv_paper_can_download_pdf(monkeypatch, tmp_path):
 
     pdf_bytes = b"%PDF-1.4\n" + b"0" * 1100
     requested = []
+    closed = []
 
     def fake_get(url, **kwargs):
         requested.append(url)
-        return SimpleNamespace(raise_for_status=lambda: None, content=pdf_bytes)
+        assert kwargs.get("stream") is True
+        return SimpleNamespace(
+            raise_for_status=lambda: None,
+            iter_content=lambda chunk_size: (
+                pdf_bytes[start:start + chunk_size]
+                for start in range(0, len(pdf_bytes), chunk_size)
+            ),
+            close=lambda: closed.append(url),
+        )
 
     monkeypatch.setattr(requests, "get", fake_get)
     response = api.download_paper_pdf("test", paper.paper_id)
     assert response.media_type == "application/pdf"
     assert Path(response.path).read_bytes() == pdf_bytes
     assert requested == ["https://arxiv.org/pdf/2401.12345.pdf"]
+    assert closed == requested
     assert store.get_paper(paper.paper_id).pdf_path == response.path
 
 
@@ -69,6 +79,59 @@ def test_imported_crossref_paper_keeps_doi_and_is_not_duplicated(monkeypatch, tm
     })
     assert second["created"] is False
     assert len(store.list_papers()) == 1
+
+
+def test_imported_s2_paper_keeps_doi_from_evidence_extra(monkeypatch, tmp_path):
+    """S2 候选的 S2 paperId 无法直接还原 DOI；导入必须沿用证据链 extra 里的标识。"""
+    store = _project(monkeypatch, tmp_path)
+    store.log_evidence({
+        "subquery": "fed security", "source": "s2",
+        "title": "An S2 paper with DOI", "external_id": "s2paperid1234567890",
+        "snippet": "An abstract", "evidence_score": 0.0,
+        "doi": "10.5678/s2-doi", "url": "https://doi.org/10.5678/s2-doi",
+    })
+    result = api.import_unlinked_paper("test", {
+        "external_id": "s2paperid1234567890", "title": "An S2 paper with DOI",
+    })
+    paper = store.get_paper(result["paper_id"])
+    assert paper.doi == "10.5678/s2-doi"
+    assert paper.url == "https://doi.org/10.5678/s2-doi"
+    assert paper.metadata["pdf_url"] == ""
+
+
+def test_unlinked_listing_flags_s2_duplicate_and_merges_cross_source_hits(monkeypatch, tmp_path):
+    """同论文被 arXiv + S2 双源命中只出一张候选卡；已入库的 S2 候选标记 dedup_merged。"""
+    store = _project(monkeypatch, tmp_path)
+    # 同一标题、两个不同外部 ID（arXiv / S2）
+    store.log_evidence({
+        "subquery": "q", "source": "arxiv", "title": "Dual-source paper",
+        "external_id": "2501.99999", "snippet": "a",
+    })
+    store.log_evidence({
+        "subquery": "q", "source": "s2", "title": "Dual-Source Paper",
+        "external_id": "s2id-abcdef", "snippet": "b",
+        "doi": "10.9999/dual",
+    })
+    listing = api.list_unlinked_papers("test")
+    assert listing["total"] == 1
+    cand = listing["papers"][0]
+    assert cand["external_id"] == "2501.99999"  # 先出现的 ID 保留
+    assert cand["hit_count"] == 2
+
+    # 导入后（以 S2 ID 入库），两源候选都应标记 dedup_merged 而非可再次入库
+    from core.knowledge.schema import Paper
+    store.save_paper(Paper(
+        paper_id="p_s2_dup", title="Another S2 paper",
+        metadata={"source": "s2", "doc_id": "s2id-xxxx"},
+        source_stage="research",
+    ))
+    store.log_evidence({
+        "subquery": "q", "source": "s2", "title": "Another S2 paper",
+        "external_id": "s2id-xxxx", "snippet": "c",
+    })
+    listing2 = api.list_unlinked_papers("test")
+    reasons = {p["title"]: p["reason"] for p in listing2["papers"]}
+    assert reasons["Another S2 paper"] == "dedup_merged"
 
 
 def test_relevance_filter_does_not_score_and_append_each_paper_twice(monkeypatch):

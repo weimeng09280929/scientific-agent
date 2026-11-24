@@ -65,11 +65,12 @@ def check_main_pipeline() -> dict[str, Any]:
     _cfgmod._default_config = None
     from core.config import get_config
     from runtime.pipeline import Pipeline
+    from core.product_boundary import ExecutionPolicy
 
     cfg = get_config()
     cfg.dry_run = True
 
-    pipeline = Pipeline(config=cfg)
+    pipeline = Pipeline(config=cfg, execution_policy=ExecutionPolicy.INTERNAL_LEGACY)
     project_id = f"validate_main_{int(os.getpid())}"
 
     try:
@@ -126,10 +127,11 @@ def check_discovery_pipeline() -> dict[str, Any]:
     _cfgmod._default_config = None
     from core.config import get_config
     from runtime.pipeline import Pipeline
+    from core.product_boundary import ExecutionPolicy
 
     cfg = get_config()
     cfg.dry_run = True
-    pipeline = Pipeline(config=cfg)
+    pipeline = Pipeline(config=cfg, execution_policy=ExecutionPolicy.INTERNAL_LEGACY)
     project_id = f"validate_disc_{int(os.getpid())}"
 
     try:
@@ -170,10 +172,11 @@ def check_resume_recovery() -> dict[str, Any]:
     _cfgmod._default_config = None
     from core.config import get_config
     from runtime.pipeline import Pipeline
+    from core.product_boundary import ExecutionPolicy
 
     cfg = get_config()
     cfg.dry_run = True
-    pipeline = Pipeline(config=cfg)
+    pipeline = Pipeline(config=cfg, execution_policy=ExecutionPolicy.INTERNAL_LEGACY)
     project_id = f"validate_resume_{int(os.getpid())}"
     topic = "热电材料性能优化测试"
 
@@ -201,9 +204,14 @@ def check_resume_recovery() -> dict[str, Any]:
         print(_fail(f"resume 异常: {e}"))
         return {"status": "error"}
 
-    # 校验：resume 后能从 stopped 状态恢复
-    if result2.status not in ("completed", "failed"):
-        print(_warn(f"resume 状态异常：{result2.status}"))
+    # dry_run 没有真实实验结果，允许停在实验门槛；不把失败任意视为通过。
+    if result2.status not in ("completed", "experiment_failed", "experiment_pending"):
+        print(_fail(f"resume 状态异常：{result2.status}"))
+        return {"status":"unexpected_status", "resume":result2.status}
+    from stages.common import RESEARCH_TOPIC
+    _, restored_ctx = pipeline.resume_project(project_id)
+    if restored_ctx.get(RESEARCH_TOPIC) != topic:
+        return {"status":"topic_not_restored"}
 
     print(_ok(f"resume 验证通过：首次 {result1.status}, resume {result2.status}"))
     return {"status": "pass", "first": result1.status, "resume": result2.status}
@@ -219,11 +227,12 @@ def check_blocked_recovery() -> dict[str, Any]:
     _cfgmod._default_config = None
     from core.config import get_config
     from runtime.pipeline import Pipeline
+    from core.product_boundary import ExecutionPolicy
     from core.state.lifecycle import LifecycleStage, StageStatus
 
     cfg = get_config()
     cfg.dry_run = True
-    pipeline = Pipeline(config=cfg)
+    pipeline = Pipeline(config=cfg, execution_policy=ExecutionPolicy.INTERNAL_LEGACY)
     project_id = f"validate_blocked_{int(os.getpid())}"
     topic = "blocked 测试主题"
 
@@ -279,10 +288,11 @@ def check_stage_propagation() -> dict[str, Any]:
     _cfgmod._default_config = None
     from core.config import get_config
     from runtime.pipeline import Pipeline
+    from core.product_boundary import ExecutionPolicy
 
     cfg = get_config()
     cfg.dry_run = True
-    pipeline = Pipeline(config=cfg)
+    pipeline = Pipeline(config=cfg, execution_policy=ExecutionPolicy.INTERNAL_LEGACY)
     project_id = f"validate_prop_{int(os.getpid())}"
     topic = "热电材料构效关系传播验证"
 
@@ -304,13 +314,15 @@ def check_stage_propagation() -> dict[str, Any]:
     ideas = store.list_ideas()
     claims = store.list_claims()
     cv_report = store.get_kv("cross_validation_report") or {}
+    from stages.common import RESEARCH_PAPER_IDS
+    _, restored = pipeline.resume_project(project_id)
 
     # 检查关键字段非空
     checks = {
         "ideas 生成": len(ideas) > 0,
         "claims 生成": len(claims) > 0,
         "cv_report 持久化": bool(cv_report),
-        "papers 入库": len(store.list_papers()) >= 0,
+        "dry_run 占位论文引用的快照恢复（非真实入库）": bool(restored.get(RESEARCH_PAPER_IDS)),
     }
     failed = [k for k, v in checks.items() if not v]
     if failed:

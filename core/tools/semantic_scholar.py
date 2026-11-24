@@ -17,6 +17,9 @@ from typing import Optional
 
 import requests
 
+from core.tools.http import http_get
+from core.tools.search_result import SearchResults
+
 logger = logging.getLogger(__name__)
 
 _S2_API = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -97,17 +100,23 @@ def search_semantic_scholar(
         params["year"] = f"-{year_to}"
 
     try:
-        resp = requests.get(_S2_API, params=params, timeout=timeout)
+        resp = http_get(_S2_API, params=params, timeout=timeout)
         resp.raise_for_status()
     except requests.RequestException as e:
         logger.warning("S2 检索失败（query=%r）: %s", query, e)
-        return []
+        return SearchResults.failure(e)
 
     # S2 限流：每秒不超过 1 个请求（无 API key 时更严格）
     time.sleep(1.0)
 
-    data = resp.json()
-    papers = _parse_s2_response(data, source_subquery=source_subquery)
+    try:
+        data = resp.json()
+        if not isinstance(data["data"], list):
+            raise ValueError("data is not a list")
+        papers = _parse_s2_response(data, source_subquery=source_subquery)
+        errors = len(data["data"])-len(papers)
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        return SearchResults.failure(exc,resp)
     # 客户端兜底：年份硬过滤（API 偶发返回边界外结果）
     if (year_from is not None or year_to is not None) and papers:
         papers = [
@@ -115,7 +124,8 @@ def search_semantic_scholar(
             if (year_from is None or (p.year or 0) >= year_from)
             and (year_to is None or (p.year or 9999) <= year_to)
         ]
-    return papers
+    return SearchResults(papers, response=resp, raw_count=len(data["data"]),
+                         parse_errors=errors, available=data.get("total"))
 
 
 def _parse_s2_response(data: dict, source_subquery: str = "") -> list[S2Paper]:
@@ -124,6 +134,8 @@ def _parse_s2_response(data: dict, source_subquery: str = "") -> list[S2Paper]:
     items = data.get("data", []) or []
     for item in items:
         try:
+            if not item.get("title"):
+                continue
             external_ids = item.get("externalIds", {}) or {}
             authors_raw = item.get("authors", []) or []
             authors = [a.get("name", "") for a in authors_raw if a.get("name")]

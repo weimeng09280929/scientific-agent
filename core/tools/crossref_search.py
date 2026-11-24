@@ -11,6 +11,9 @@ from typing import Optional
 
 import requests
 
+from core.tools.http import http_get
+from core.tools.search_result import SearchResults
+
 logger = logging.getLogger(__name__)
 
 _CROSSREF_API = "https://api.crossref.org/works"
@@ -87,13 +90,17 @@ def search_crossref(
         filters.append(f"until-pub-date:{int(year_to)}-12-31")
     if filters:
         params["filter"] = ",".join(filters)
+    response = None
     try:
-        response = requests.get(_CROSSREF_API, params=params, headers=_HEADERS, timeout=timeout)
+        response = http_get(_CROSSREF_API, params=params, headers=_HEADERS, timeout=timeout)
         response.raise_for_status()
-        items = response.json().get("message", {}).get("items", []) or []
-    except (requests.RequestException, ValueError, TypeError) as exc:
+        payload = response.json()["message"]
+        items = payload["items"]
+        if not isinstance(items, list):
+            raise ValueError("items is not a list")
+    except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError) as exc:
         logger.warning("Crossref 检索失败（query=%r）: %s", query, exc)
-        return []
+        return SearchResults.failure(exc,response)
 
     papers: list[CrossrefPaper] = []
     for item in items:
@@ -120,4 +127,5 @@ def search_crossref(
             ))
         except (AttributeError, IndexError, TypeError, ValueError) as exc:
             logger.warning("解析 Crossref 论文失败: %s", exc)
-    return papers
+    return SearchResults(papers, response=response, raw_count=len(items),
+                         parse_errors=len(items)-len(papers), available=payload.get("total-results"))

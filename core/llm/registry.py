@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 from typing import Any, Optional, Type, TypeVar
 
@@ -31,6 +32,7 @@ from core.llm.base import (
     StructuredOutputRequest,
 )
 from core.llm.task_router import TaskRouter
+from core.invocation_audit import audited_model, span
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -165,6 +167,7 @@ class LLMRegistry:
 
     # ===== 统一调用接口 =====
 
+    @audited_model
     def complete(
         self,
         task_type: str,
@@ -174,18 +177,47 @@ class LLMRegistry:
         temperature_override: Optional[float] = None,
         max_tokens_override: Optional[int] = None,
     ) -> LLMResponse:
-        """按 task_type 调用 LLM 补全/对话。"""
+        """按 task_type 调用 LLM 补全/对话。
+
+        含升级重试：推理模型（deepseek-v4.1-flash 等）经部分网关调用时，
+        reasoning token 也计入 max_tokens 预算——长 prompt 下推理会耗光全部
+        预算（finish_reason=length 且 content 为空）。检测到该情况时自动
+        放大 max_tokens 重试一次。
+        """
         cfg = self._router.get(task_type)
         provider = self._get_provider(cfg.provider)
-        request = LLMRequest(
-            prompt=prompt,
-            messages=messages,
-            system=system,
-            temperature=temperature_override if temperature_override is not None else cfg.temperature,
-            max_tokens=max_tokens_override or cfg.max_tokens,
-        )
-        return provider.complete(request, model=cfg.model)
 
+        def _build_request(max_tokens: int) -> LLMRequest:
+            return LLMRequest(
+                prompt=prompt,
+                messages=messages,
+                system=system,
+                temperature=temperature_override if temperature_override is not None else cfg.temperature,
+                max_tokens=max_tokens,
+            )
+
+        base_max_tokens = max_tokens_override or cfg.max_tokens
+        resp = provider.complete(_build_request(base_max_tokens), model=cfg.model)
+
+        raw = resp.raw or {}
+        finish_reason = ((raw.get("choices") or [{}])[0]).get("finish_reason")
+        if finish_reason == "length":
+            from core.llm.base import LLMTruncatedError
+            from core.invocation_audit import ACTIVE
+            if ACTIVE.get() and ACTIVE.get().stop_on_model_failure:
+                raise LLMTruncatedError("本次验收输出截断，按停止条件不追加调用")
+            bumped = min(max(base_max_tokens * 2, 8192), 32768)
+            if bumped <= base_max_tokens:
+                raise LLMTruncatedError("模型正文输出仍被截断，未采用不完整内容")
+            logger.warning("complete(%s): 输出截断，预算 %d → %d，仅重试一次",task_type,base_max_tokens,bumped)
+            retry_resp = provider.complete(_build_request(bumped), model=cfg.model)
+            retry_finish = (((retry_resp.raw or {}).get("choices") or [{}])[0]).get("finish_reason")
+            if retry_finish == "length":
+                raise LLMTruncatedError("模型正文输出重试后仍被截断，未采用不完整内容")
+            return retry_resp
+        return resp
+
+    @audited_model
     def structured_output(
         self,
         task_type: str,
@@ -194,6 +226,8 @@ class LLMRegistry:
         messages: Optional[list[dict[str, str]]] = None,
         system: Optional[str] = None,
         temperature_override: Optional[float] = None,
+        max_tokens_override: Optional[int] = None,
+        automatic_retry: bool = True,
     ) -> T:
         """按 task_type 调用 LLM 结构化输出。返回 Pydantic 实例。
 
@@ -202,20 +236,45 @@ class LLMRegistry:
         """
         cfg = self._router.get(task_type)
         provider = self._get_provider(cfg.provider)
+        token_budget = cfg.max_tokens if max_tokens_override is None else max_tokens_override
+        if not 256 <= token_budget <= 32768:
+            raise ValueError("结构化输出预算须在256到32768之间")
         request = StructuredOutputRequest(
             output_schema=output_schema,
             prompt=prompt,
             messages=messages,
             system=system,
             temperature=temperature_override if temperature_override is not None else cfg.temperature,
+            max_tokens=token_budget,
+            automatic_retry=automatic_retry,
         )
         try:
             result = provider.structured_output(request, model=cfg.model)
             return self._coerce(result, output_schema)
         except LLMError as e:
+            from core.llm.base import LLMTruncatedError
+            from core.invocation_audit import ACTIVE
+            if not automatic_retry or ACTIVE.get() and ACTIVE.get().stop_on_model_failure:
+                raise
+            if isinstance(e, LLMTruncatedError):
+                # 推理和最终 JSON 共享预算。最多额外请求一次，且不超过 32768。
+                bumped = min(max(token_budget * 2, 8192), 32768)
+                if bumped <= token_budget:
+                    raise
+                logger.warning("structured_output(%s) 被截断，预算 %d → %d，重试一次", task_type, token_budget, bumped)
+                request.max_tokens = bumped
+                with span("phase", "model", "model_repair:truncated_output"):
+                    return self._coerce(provider.structured_output(request, model=cfg.model), output_schema)
             err_msg = str(e)
-            # 仅当「返回 schema 定义」或「不符合 schema」时重试，其他错误（如网络）直接抛
-            if "schema 定义本身" not in err_msg and "不符合 schema" not in err_msg:
+            # 「返回 schema 定义」「不符合 schema」「返回空/非 JSON」（网关偶发抽风
+            # 返回空内容，如 tokendance 中转的 deepseek）均值得重试一次；
+            # 其他错误（如网络异常、鉴权失败）直接抛
+            retryable = (
+                "schema 定义本身" in err_msg
+                or "不符合 schema" in err_msg
+                or "非合法 JSON" in err_msg
+            )
+            if not retryable:
                 raise
             logger.warning(
                 "structured_output 首次失败（%s），追加实例提示重试一次",
@@ -224,16 +283,25 @@ class LLMRegistry:
             # 在 prompt 末尾追加强提示
             reminder = (
                 "\n\n【重要】请直接返回符合 schema 的实例 JSON 数据，"
-                "不要返回 $defs / properties / type 等 schema 元字段。"
+                "不要复述 $defs / properties 等 schema 元字段；实例中声明的 type 字段必须保留。"
                 "例如若 schema 要求 {ideas: list[IdeaDraftItem]}，"
                 "应返回 {\"ideas\": [{\"text\": \"具体思路描述\", ...}]}。"
             )
+            issues = getattr(e, "structure_issues", None)
+            if issues:
+                reminder = (
+                    "\n\n【一次结构修复】上次实例未通过以下字段校验："
+                    + json.dumps(issues, ensure_ascii=False)
+                    + "。请修复这些字段并返回符合所给schema的完整实例。不要新增price、cost等未定义字段；"
+                    "保留原有事实、引用和待确认状态，不编造缺失资料。不能只返回schema定义或局部补丁。"
+                )
             if prompt is not None:
                 request = StructuredOutputRequest(
                     output_schema=output_schema,
                     prompt=prompt + reminder,
                     system=system,
                     temperature=request.temperature,
+                    max_tokens=token_budget,
                 )
             elif messages is not None:
                 msgs = list(messages)
@@ -246,8 +314,10 @@ class LLMRegistry:
                     messages=msgs,
                     system=system,
                     temperature=request.temperature,
+                    max_tokens=token_budget,
                 )
-            result = provider.structured_output(request, model=cfg.model)
+            with span("phase", "model", "model_repair:invalid_structure"):
+                result = provider.structured_output(request, model=cfg.model)
             return self._coerce(result, output_schema)
 
     @staticmethod
@@ -281,4 +351,8 @@ class LLMRegistry:
                 f"Provider {name} 未注册（可能缺少对应环境变量凭据），"
                 f"当前可用 providers={list(self._providers.keys())}"
             )
-        return self._providers[name]
+        provider = self._providers[name]
+        from core.invocation_audit import ACTIVE
+        if ACTIVE.get() and not getattr(provider,"audited_transport",False):
+            raise LLMError("当前提供方尚未接入可约束的请求审计，本次未发出调用；请使用已支持的兼容接口")
+        return provider

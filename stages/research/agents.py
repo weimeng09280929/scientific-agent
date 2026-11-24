@@ -16,10 +16,12 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -57,6 +59,8 @@ from core.tools.journal_quality import enrich_paper_quality, build_pdf_url
 from core.tools.crossref_search import search_crossref
 from core.tools.openalex_search import search_openalex
 from core.tools.url_resolve import resolve_paper_url
+from core.knowledge.innovation_playbook import INNOVATION_PATTERNS_PROMPT
+from core.knowledge.domain_profile import get_domain_profile
 
 from stages.common import (
     DRY_RUN,
@@ -201,7 +205,7 @@ class ResearchGapItem(BaseModel):
     - 文献溯源完整性：cited_paper_ids + cited_chunk_ids（每条 Gap 有清晰证据链）
     """
 
-    gap: str = Field(description="Gap 陈述，聚焦材料领域的具体空白点，而非泛泛而谈")
+    gap: str = Field(description="Gap 陈述，聚焦所在研究领域的具体空白点（可证伪、可被新研究填补），而非泛泛而谈")
     type: str = Field(description="Gap 类型，限定为：underexplored / contradiction / missing_connection / method_gap / data_gap")
     importance: float = Field(description="重要性 0~1，越接近 1 越关键", ge=0.0, le=1.0)
     actionability: str = Field(description="可操作性 high / medium / low", default="medium")
@@ -236,6 +240,11 @@ class ConflictReportSchema(BaseModel):
     consensus: list[ConsensusItem] = []
     gaps: list[ResearchGapItem] = []
     overall_confidence: float = 0.0
+    # 领域脉络（写作方法论 M2）：3-5 句概括该方向已有工作版图、成熟点与分歧点
+    landscape: str = Field(
+        default="",
+        description="领域脉络：用 3-5 句概括该子问题下已有研究的整体图景、成熟结论与主要分歧",
+    )
 
 
 # ===== TopicRefineAgent =====
@@ -574,7 +583,7 @@ class PaperFetchAgent(AgentNode):
             paper_metas = self._placeholder(input_obj)
             evidence_chain: list[dict] = []
         else:
-            paper_metas, evidence_chain = self._real_fetch(input_obj)
+            paper_metas, evidence_chain = self._real_fetch(input_obj, ctx)
 
         # 去重（按 arxiv_id 优先，其次 title）
         paper_metas = self._dedup(paper_metas)
@@ -608,8 +617,14 @@ class PaperFetchAgent(AgentNode):
             ),
         )
 
-    def _real_fetch(self, input_obj: PaperFetchInput) -> tuple[list[dict], list[dict]]:
+    def _real_fetch(self, input_obj: PaperFetchInput, ctx: Optional[ExecutionContext] = None) -> tuple[list[dict], list[dict]]:
         """真实并行检索：Sciverse 主源（证据片段级）+ arxiv/S2 补充。
+
+        提速设计：
+        - 子问题内 arXiv 与 Sciverse 相互独立 → 并行抓取；S2 限流严格 → 串行其后；
+        - 子问题间最多 4 并发（外层）+ 2 并发（内层）；
+        - 各检索源超时收紧（15/20s），避免单点挂死拖慢整体；
+        - 实时上报进度（kv: web.paper_fetch_progress），前端可见百分比。
 
         Returns:
             (paper_metas, evidence_chain)：paper_metas 为候选元数据列表；
@@ -619,14 +634,11 @@ class PaperFetchAgent(AgentNode):
         if not subqueries:
             return [], []
         evidence_chain: list[dict] = []
+        self._report_progress(ctx, 0, len(subqueries), 0)
 
-        def fetch_one(sq: str) -> list[dict]:
+        def _search_arxiv(sq: str, ym, yx, vh) -> tuple[list[dict], list[dict]]:
             metas: list[dict] = []
-            ym = getattr(self, "_year_min", None)
-            yx = getattr(self, "_year_max", None)
-            vh = (getattr(self, "_venue_hint", "") or "").lower()
-
-            # ===== 1. arxiv 检索（核心，含 abstract 全文）=====
+            ev: list[dict] = []
             try:
                 arxiv_papers = search_arxiv(
                     query=sq,
@@ -634,6 +646,7 @@ class PaperFetchAgent(AgentNode):
                     source_subquery=sq,
                     year_from=ym,
                     year_to=yx,
+                    timeout=15,
                 )
                 for p in arxiv_papers:
                     # 期刊关键词过滤（arxiv 的 venue 是类目，按类目名匹配）
@@ -643,7 +656,7 @@ class PaperFetchAgent(AgentNode):
                     m["source_subquery"] = sq
                     m["source"] = "arxiv"
                     metas.append(m)
-                    evidence_chain.append({
+                    ev.append({
                         "subquery": sq,
                         "source": "arxiv",
                         "title": p.title,
@@ -655,8 +668,11 @@ class PaperFetchAgent(AgentNode):
                     })
             except Exception as e:
                 logger.warning("arxiv 检索失败（sq=%r）: %s", sq, e)
+            return metas, ev
 
-            # ===== 2. S2 补充（引用图谱/venue/影响力，限 S2_PER_SUBQUERY 篇）=====
+        def _search_s2(sq: str, ym, yx, vh) -> tuple[list[dict], list[dict]]:
+            metas: list[dict] = []
+            ev: list[dict] = []
             try:
                 s2_papers = search_semantic_scholar(
                     query=sq,
@@ -664,6 +680,7 @@ class PaperFetchAgent(AgentNode):
                     source_subquery=sq,
                     year_from=ym,
                     year_to=yx,
+                    timeout=15,
                 )
                 for p in s2_papers:
                     # 期刊关键词过滤（S2 有真实 venue 字段）
@@ -673,7 +690,7 @@ class PaperFetchAgent(AgentNode):
                     m["source_subquery"] = sq
                     m["source"] = "s2"
                     metas.append(m)
-                    evidence_chain.append({
+                    ev.append({
                         "subquery": sq,
                         "source": "s2",
                         "title": p.title,
@@ -682,48 +699,77 @@ class PaperFetchAgent(AgentNode):
                         "evidence_score": 0.0,
                         "snippet": (p.abstract or "")[:300],
                         "paper_id": None,
+                        # 可核验标识：手动补录入库后供原文跳转与 PDF 下载
+                        "doi": p.doi or "",
+                        "arxiv_id": p.arxiv_id or "",
+                        "url": p.url or "",
+                        "pdf_url": p.pdf_url or "",
                     })
             except Exception as e:
                 logger.warning("S2 检索失败（sq=%r）: %s", sq, e)
+            return metas, ev
 
-            # ===== 3. Sciverse 主源：证据片段级检索（评审要求推荐，无 token 时优雅跳过）=====
-            if sciverse_is_available():
-                try:
-                    evidences = sciverse_agentic_search(
-                        query=sq,
-                        max_results=self.SCIVERSE_PER_SUBQUERY,
-                        source_subquery=sq,
-                    )
-                    for ev in evidences:
-                        # 年份硬过滤（Sciverse API 不支持年份参数——实测 year_from/filters
-                        # 均被忽略或返回 400，故在此按 publication_published_year 本地过滤，
-                        # 与 arxiv/S2 的二次过滤语义一致：未知年份按 0/9999 兜底剔除）。
-                        if (ym is not None or yx is not None):
-                            ev_year = ev.year or 0
-                            if ym is not None and ev_year < ym:
-                                continue
-                            if yx is not None and ev_year > yx:
-                                continue
-                        ev_venue = (getattr(ev, "venue", "") or "").lower()
-                        # 期刊关键词过滤（仅当 Sciverse 返回 venue 元数据时）
-                        if vh and ev_venue and vh not in ev_venue:
+        def _search_sciverse(sq: str, ym, yx, vh) -> tuple[list[dict], list[dict]]:
+            metas: list[dict] = []
+            ev: list[dict] = []
+            if not sciverse_is_available():
+                return metas, ev
+            try:
+                evidences = sciverse_agentic_search(
+                    query=sq,
+                    max_results=self.SCIVERSE_PER_SUBQUERY,
+                    source_subquery=sq,
+                    timeout=20,
+                )
+                for item in evidences:
+                    # 年份硬过滤（Sciverse API 不支持年份参数——实测 year_from/filters
+                    # 均被忽略或返回 400，故在此按 publication_published_year 本地过滤，
+                    # 与 arxiv/S2 的二次过滤语义一致：未知年份按 0/9999 兜底剔除）。
+                    if (ym is not None or yx is not None):
+                        ev_year = item.year or 0
+                        if ym is not None and ev_year < ym:
                             continue
-                        m = ev.to_meta_dict()
-                        m["source_subquery"] = sq
-                        metas.append(m)
-                        evidence_chain.append({
-                            "subquery": sq,
-                            "source": "sciverse",
-                            "title": ev.title,
-                            "external_id": ev.doc_id,
-                            "offset": ev.offset,
-                            "evidence_score": ev.score,
-                            "snippet": (ev.snippet or "")[:300],
-                            "paper_id": None,
-                        })
-                except Exception as e:
-                    logger.warning("Sciverse 检索失败（sq=%r）: %s", sq, e)
+                        if yx is not None and ev_year > yx:
+                            continue
+                    ev_venue = (getattr(item, "venue", "") or "").lower()
+                    # 期刊关键词过滤（仅当 Sciverse 返回 venue 元数据时）
+                    if vh and ev_venue and vh not in ev_venue:
+                        continue
+                    m = item.to_meta_dict()
+                    m["source_subquery"] = sq
+                    metas.append(m)
+                    ev.append({
+                        "subquery": sq,
+                        "source": "sciverse",
+                        "title": item.title,
+                        "external_id": item.doc_id,
+                        "offset": item.offset,
+                        "evidence_score": item.score,
+                        "snippet": (item.snippet or "")[:300],
+                        "paper_id": None,
+                        # 可核验标识：手动补录入库后供原文跳转与 PDF 下载
+                        "doi": item.doi or "",
+                        "url": item.url or "",
+                    })
+            except Exception as e:
+                logger.warning("Sciverse 检索失败（sq=%r）: %s", sq, e)
+            return metas, ev
 
+        def fetch_one(sq: str) -> tuple[list[dict], list[dict]]:
+            ym = getattr(self, "_year_min", None)
+            yx = getattr(self, "_year_max", None)
+            vh = (getattr(self, "_venue_hint", "") or "").lower()
+            # arXiv 与 Sciverse 相互独立 → 并行；S2 限流严格 → 串行其后
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                f_arxiv = ex.submit(_search_arxiv, sq, ym, yx, vh)
+                f_sci = ex.submit(_search_sciverse, sq, ym, yx, vh)
+                arxiv_metas, arxiv_ev = f_arxiv.result()
+                sci_metas, sci_ev = f_sci.result()
+            metas = arxiv_metas + sci_metas
+            ev_entries = arxiv_ev + sci_ev
+            s2_metas, s2_ev = _search_s2(sq, ym, yx, vh)
+            metas.extend(s2_metas)
+            ev_entries.extend(s2_ev)
             # 长句查询和 S2 限流都很常见；仅在本子问题零命中时使用短词及
             # 无密钥的 DOI/学术图谱源，仍只返回可溯源的真实论文。
             if not metas:
@@ -745,27 +791,40 @@ class PaperFetchAgent(AgentNode):
                             m["source"] = source
                             m["source_subquery"] = sq
                             metas.append(m)
-                            evidence_chain.append({
+                            ev_entries.append({
                                 "subquery": sq, "source": source,
                                 "title": m["title"],
                                 "external_id": m.get("doi") or m["url"],
                                 "offset": 0, "evidence_score": 0.0,
                                 "snippet": (m.get("abstract") or "")[:300],
                                 "paper_id": None,
+                                # 可核验标识：手动补录入库后供原文跳转与 PDF 下载
+                                "doi": m.get("doi") or "",
+                                "url": m.get("url") or "",
+                                "pdf_url": m.get("pdf_url") or "",
                             })
                         if metas:
                             break
                     except Exception as e:
                         logger.warning("%s 兜底检索失败（query=%r）: %s", source, compact, e)
+            return metas, ev_entries
 
-            return metas
-
-        # 并行检索（每子问题一个 worker，最多 4 并发）
+        # 并行检索（子问题间最多 4 并发），完成一个子问题即上报一次进度
         paper_metas: list[dict] = []
         with ThreadPoolExecutor(max_workers=min(4, len(subqueries))) as pool:
-            results = list(pool.map(fetch_one, subqueries))
-        for sub in results:
-            paper_metas.extend(sub)
+            futures = {pool.submit(fetch_one, sq): sq for sq in subqueries}
+            done = 0
+            for fut in as_completed(futures):
+                sq = futures[fut]
+                try:
+                    m, ev_entries = fut.result()
+                except Exception as e:
+                    logger.warning("子问题检索失败（%r）: %s", sq, e)
+                    m, ev_entries = [], []
+                paper_metas.extend(m)
+                evidence_chain.extend(ev_entries)
+                done += 1
+                self._report_progress(ctx, done, len(subqueries), len(paper_metas))
 
         if not paper_metas:
             # 模型生成的子问题可能整体不适于检索，再以核心关键词重试一次。
@@ -790,6 +849,9 @@ class PaperFetchAgent(AgentNode):
                             "title": m["title"], "external_id": m.get("doi"),
                             "offset": 0, "evidence_score": 0.0,
                             "snippet": (m.get("abstract") or "")[:300], "paper_id": None,
+                            "doi": m.get("doi") or "",
+                            "url": m.get("url") or "",
+                            "pdf_url": m.get("pdf_url") or "",
                         })
                     if paper_metas:
                         break
@@ -797,6 +859,28 @@ class PaperFetchAgent(AgentNode):
                     logger.warning("关键词兜底检索失败（query=%r）: %s", compact, e)
 
         return paper_metas, evidence_chain
+
+    def _report_progress(self, ctx: ExecutionContext, done: int, total: int, fetched: int) -> None:
+        """把 paper_fetch 进度写入 KV（web.paper_fetch_progress），供 /status 轮询与前端进度条展示。
+
+        失败静默降级（进度展示不影响主流程）。
+        """
+        try:
+            if ctx is None:
+                return
+            store: Optional[KnowledgeStore] = ctx.get(KNOWLEDGE_STORE)
+            if store is None:
+                return
+            store.save_kv("web.paper_fetch_progress", {
+                "node": "paper_fetch",
+                "done": done,
+                "total": max(total, 1),
+                "fetched": fetched,
+                "percent": round(done * 100.0 / max(total, 1), 1),
+                "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        except Exception as e:  # noqa: BLE001
+            logger.debug("写入 paper_fetch 进度失败: %s", e)
 
     @staticmethod
     def _placeholder(input_obj: PaperFetchInput) -> list[dict]:
@@ -829,9 +913,30 @@ class PaperFetchAgent(AgentNode):
             out.append(m)
         return out
 
-    @staticmethod
-    def _enrich_quality(paper_metas: list[dict]) -> None:
-        """给每篇论文补充期刊质量指标 + PDF 下载链接（原地修改）。
+    ENRICH_WORKERS = 6  # 质量增强并发数（每篇独立，无共享状态）
+    ENRICH_TIME_BUDGET = 60.0  # 联网解析 PDF 的总时间预算（秒），超时走本地兜底
+
+    @classmethod
+    def _enrich_one(cls, m: dict) -> None:
+        """单篇质量增强（原地修改），供并行调度。"""
+        try:
+            enrich_paper_quality(m)
+            # 已有直链或 arxiv_id 的论文直接构造，无需联网
+            if not (m.get("pdf_url") or "").strip() and not (m.get("arxiv_id") or "").strip():
+                try:
+                    # Crossref 反查 DOI + Unpaywall 找 OA PDF（联网，失败则静默跳过）
+                    from core.tools.doi_resolve import resolve_pdf_link
+                    resolve_pdf_link(m)
+                except Exception:  # noqa: BLE001
+                    pass  # 网络失败时由下方本地构造兜底
+            if not (m.get("pdf_url") or "").strip():
+                m["pdf_url"] = build_pdf_url(m)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("期刊质量增强失败（%r）: %s", m.get("title"), e)
+
+    @classmethod
+    def _enrich_quality(cls, paper_metas: list[dict]) -> None:
+        """给每篇论文补充期刊质量指标 + PDF 下载链接（原地修改，并行 + 时间预算）。
 
         补充字段：
         - impact_factor: float（JCR 影响因子，0.0 = 未收录/预印本）
@@ -840,27 +945,35 @@ class PaperFetchAgent(AgentNode):
         - is_top_journal: bool
         - pdf_url: str（可下载 PDF 链接，空 = 无法下载）
 
-        注意：PDF 链接解析（Crossref 反查 DOI + Unpaywall 找 OA PDF）会发起
-        网络请求，串行执行并按请求限流；仅对没有 pdf_url/arxiv_id 的论文触发，
-        避免重复抓取。
+        提速设计：
+        - 各论文增强相互独立 → 线程池并行（ENRICH_WORKERS）；
+        - 联网 PDF 解析（Crossref 反查 + Unpaywall）可能很慢 → 总时间预算
+          ENRICH_TIME_BUDGET，超时后剩余论文直接走本地 build_pdf_url 构造，
+          不再发网络请求，避免十几分钟级别的长尾等待。
         """
+        if not paper_metas:
+            return
+        deadline = time.monotonic() + cls.ENRICH_TIME_BUDGET
+        with ThreadPoolExecutor(max_workers=cls.ENRICH_WORKERS) as pool:
+            futures = {pool.submit(cls._enrich_one, m): m for m in paper_metas}
+            for fut in as_completed(futures):
+                m = futures[fut]
+                # 超预算：取消尚未启动的任务，剩余论文全部走本地兜底构造
+                if time.monotonic() > deadline:
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    fut.result()
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("质量增强任务异常（%r）: %s", m.get("title"), e)
+        # 兜底：确保所有论文都有可下载链接（无联网代价）
         for m in paper_metas:
-            try:
-                enrich_paper_quality(m)
-                # 已有直链或 arxiv_id 的论文直接构造，无需联网
-                if not (m.get("pdf_url") or "").strip() and not (m.get("arxiv_id") or "").strip():
-                    try:
-                        # Crossref 反查 DOI + Unpaywall 找 OA PDF（联网，失败则静默跳过）
-                        from core.tools.doi_resolve import resolve_pdf_link
-                        resolve_pdf_link(m)
-                    except Exception:  # noqa: BLE001
-                        # 网络失败时退化为本地构造（doi.org 兜底）
-                        if not (m.get("pdf_url") or "").strip():
-                            m["pdf_url"] = build_pdf_url(m)
-                if not (m.get("pdf_url") or "").strip():
+            if not (m.get("pdf_url") or "").strip():
+                try:
                     m["pdf_url"] = build_pdf_url(m)
-            except Exception as e:  # noqa: BLE001
-                logger.debug("期刊质量增强失败（%r）: %s", m.get("title"), e)
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 # ===== PaperRelevanceFilterAgent（借鉴 PaperQA filter）=====
@@ -1158,6 +1271,7 @@ class PaperIngestAgent(AgentNode):
                     url=meta.get("url"),
                     metadata={
                         "source_subquery": meta.get("source_subquery", ""),
+                        "text_origin": "source_abstract",
                         "source": meta.get("source", ""),
                         "relevance_score": meta.get("relevance_score", 0.0),
                         "relevance_reason": meta.get("relevance_reason", ""),
@@ -1317,7 +1431,8 @@ class CrossValidateAgent(AgentNode):
         if dry_run or registry is None or store is None:
             report = self._placeholder(input_obj)
         else:
-            report = self._real_validate(input_obj, registry, store)
+            domain = str(ctx.get(PROJECT_DOMAIN) or "")
+            report = self._real_validate(input_obj, registry, store, domain=domain)
 
         # 冲突落库（重跑幂等：先清空再写入），供 Claim 冲突可视化 / 论文溯源
         self._persist_conflicts(store, report.get("conflicts", []))
@@ -1348,6 +1463,7 @@ class CrossValidateAgent(AgentNode):
         input_obj: CrossValidateInput,
         registry: LLMRegistry,
         store: KnowledgeStore,
+        domain: str = "",
     ) -> dict:
         """真实交叉验证：聚合每子问题相关论文，调用 LLM 检测冲突与结构化 Gap。
 
@@ -1365,6 +1481,13 @@ class CrossValidateAgent(AgentNode):
                 papers.append(store.get_paper(pid))
             except Exception:
                 pass
+
+        # 领域自适应：按项目研究领域取画像，prompt 不再硬编码材料学科
+        _profile = get_domain_profile(domain)
+        _dlabel = _profile["label"]
+        _entity = _profile["entity"]
+        _metric = _profile["metric"]
+        _method = _profile["method"]
 
         paper_chunks_map: dict[str, list[str]] = {}
         for pid in input_obj.paper_ids:
@@ -1388,6 +1511,7 @@ class CrossValidateAgent(AgentNode):
         all_conflicts: list[dict] = []
         all_consensus: list[dict] = []
         all_gaps: list[dict] = []
+        all_landscapes: list[str] = []
 
         topic = (input_obj.topic or "").strip()
 
@@ -1417,22 +1541,25 @@ class CrossValidateAgent(AgentNode):
             )
 
             try:
-                # 1) 先用 ConflictReportSchema 抓冲突 + 共识 + 老的子问题级 gaps
+                # 1) 先用 ConflictReportSchema 抓冲突 + 共识 + 老的子问题级 gaps + 领域脉络
                 resp = registry.structured_output(
                     task_type=self.task_type,
                     output_schema=ConflictReportSchema,
                     system=(
-                        "你是面向「材料科学文献调研」的科研助理。请严谨分析研究主题下的多源信息，"
-                        "评估材料领域的具体 Gap 而非泛泛而谈：每条 Gap 必须聚焦一个可证伪、可被新研究填补的具体空白点。\n"
+                        f"你是{_dlabel}领域的文献调研与交叉验证助手。请严谨分析研究主题下的多源信息，"
+                        f"评估该领域的具体 Gap 而非泛泛而谈：每条 Gap 必须聚焦一个可证伪、可被新研究填补的具体空白点。\n"
+                        f"领域语义锚定——研究对象：{_entity}；评价指标：{_metric}；方法条件：{_method}。\n"
                         "输出要求：\n"
                         "  - conflicts：明确陈述相反的论断；每条必须在 source_paper_ids 中填写引发冲突的具体 paper_id；\n"
                         "  - consensus：多方一致认同的结论；填写一致的 paper_id 列表；\n"
+                        "  - landscape：用 3-5 句概括该子问题下已有研究的整体图景（谁在做什么、成熟结论、主要分歧），"
+                        "这是写作阶段「领域脉络」的素材，务必基于下方论文证据概括，不臆造；\n"
                         "  - gaps：必须输出结构化的 ResearchGapItem，每条至少 3 条且覆盖不同 type，"
                         "对应类型为 underexplored / contradiction / missing_connection / method_gap / data_gap；\n"
                         "    · cited_paper_ids 必须从下方 prompt 给出的 paper_id 中选取（证据链硬要求）；\n"
                         "    · cited_chunk_ids 若有具体段落引用则列出；\n"
                         "    · importance 0~1 表示关键度；actionability 限定 high / medium / low 表示可被新研究填补的难易度；\n"
-                        "    · rationale 解释为何这是 Gap、为何对材料领域有价值。\n"
+                        f"    · rationale 解释为何这是 Gap、为何对{_dlabel}领域有价值（按文献卡片视角：该文献可引用/对比的点、局限、与后续研究的关系）。\n"
                         "  - overall_confidence：0~1 综合可信度（共识越充分、冲突占比越低 → 越高；识别出的 gap 数本身不扣分）。"
                     ),
                     prompt=(
@@ -1443,6 +1570,8 @@ class CrossValidateAgent(AgentNode):
                     ),
                 )
                 # 合并冲突（结构化）
+                if getattr(resp, "landscape", ""):
+                    all_landscapes.append(resp.landscape.strip())
                 for c in resp.conflicts:
                     source_pids = list(c.source_paper_ids or [])
                     if not source_pids and isinstance(c.sources, list):
@@ -1527,29 +1656,32 @@ class CrossValidateAgent(AgentNode):
                 ))
 
         # 数量兜底：若最终 Gap 数 < 3，补充 method_gap / missing_connection 两条
+        # （措辞按领域画像通用化，不再写死材料学科）
         existing_types = {g.get("type") for g in all_gaps}
         if len(all_gaps) < 3 or not {"method_gap", "missing_connection"} & existing_types:
             pids = [p.paper_id for p in papers[:1]] if papers else []
             if "method_gap" not in existing_types:
                 all_gaps.append(self._make_structured_gap(
-                    text="材料性能预测领域缺少统一的标准化评估协议，导致不同工作难以横向对比",
+                    text=f"{_dlabel}领域缺少统一的标准化评估协议与基准设定，"
+                         "导致不同工作的结果难以横向对比",
                     gap_type="method_gap",
                     importance=0.7,
                     actionability="high",
                     paper_ids=pids,
                     chunks=sum((paper_chunks_map.get(pid, []) for pid in pids), [])[:3],
-                    rationale="评估协议缺失是材料领域常见方法 Gap，需建立统一 benchmark",
+                    rationale="评估协议缺失是该领域常见方法 Gap，建立统一 benchmark 后后续研究可直接复用",
                     subquery=input_obj.subqueries[0] if input_obj.subqueries else "",
                 ))
             if "missing_connection" not in existing_types:
                 all_gaps.append(self._make_structured_gap(
-                    text="跨材料类别（如热电 + 电池 + 催化）的机器学习迁移学习方法尚未打通",
+                    text=f"{_dlabel}领域内跨子方向的方法或知识迁移尚未打通"
+                         "（依据已入库文献的覆盖范围判断）",
                     gap_type="missing_connection",
                     importance=0.65,
                     actionability="medium",
                     paper_ids=pids,
                     chunks=sum((paper_chunks_map.get(pid, []) for pid in pids), [])[:3],
-                    rationale="跨子领域连接是评审要求方向三关注的跨学科 Gap",
+                    rationale="跨子方向连接缺失是交叉验证发现的常见结构性 Gap",
                     subquery=input_obj.subqueries[0] if input_obj.subqueries else "",
                 ))
 
@@ -1571,12 +1703,14 @@ class CrossValidateAgent(AgentNode):
             "consensus": all_consensus,
             "gaps": all_gaps,
             "overall_confidence": overall,
+            # 领域脉络（写作方法论 M2）：各子问题 landscape 合并，供调研报告与写作骨架消费
+            "landscape": "\n".join(dict.fromkeys(all_landscapes)),
         }
 
     def _persist_conflicts(
         self, store: Optional[KnowledgeStore], conflicts: list[dict]
     ) -> None:
-        """将交叉验证的冲突项落库（幂等：先清空再写入）。
+        """按内容标识幂等落库，保留人工裁决和历史冲突。
 
         conflicts 项结构（CrossValidateOutput.report.conflicts）：
         {claim, sources: [{paper_id, chunk_id, stance}], resolution, confidence, subquery}
@@ -1586,6 +1720,17 @@ class CrossValidateAgent(AgentNode):
             return
         try:
             entities: list[ResearchConflict] = []
+            def fingerprint(claim, subquery, sources):
+                identity = [str(claim).strip(), str(subquery).strip(), sorted(
+                    (str(s.get("paper_id", "")), str(s.get("stance", "support")))
+                    for s in sources
+                )]
+                return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+
+            existing = {
+                fingerprint(item.claim, item.subquery, item.sources): item
+                for item in store.list_research_conflicts()
+            }
             paper_titles: dict[str, str] = {}
             for c in conflicts:
                 sources = []
@@ -1601,18 +1746,25 @@ class CrossValidateAgent(AgentNode):
                         paper_titles[pid] = title
                     sources.append({
                         "paper_id": pid,
+                        "chunk_id": s.get("chunk_id", ""),
                         "title": title or "",
                         "stance": s.get("stance", "support"),
                     })
-                entities.append(ResearchConflict(
-                    conflict_id=KnowledgeStore.new_id(),
+                identity = fingerprint(c.get("claim", ""), c.get("subquery", ""), sources)
+                previous = existing.get(identity)
+                entity = ResearchConflict(
+                    conflict_id=previous.conflict_id if previous else f"conflict_{identity[:24]}",
                     claim=c.get("claim", ""),
                     sources=sources,
                     resolution=c.get("resolution", ""),
                     confidence=c.get("confidence", 0.0),
                     subquery=c.get("subquery", ""),
-                ))
-            store.clear_research_conflicts()
+                )
+                if previous:
+                    entity.metadata = dict(previous.metadata)
+                    entity.created_at = previous.created_at
+                existing[identity] = entity
+                entities.append(entity)
             saved = store.save_research_conflicts(entities)
             if saved:
                 logger.info("交叉验证冲突落库：%d 条", saved)
@@ -2426,6 +2578,11 @@ class ResearchGapIdentifyAgent(AgentNode):
         registry: Optional[LLMRegistry] = ctx.get(LLM_REGISTRY)
         store: Optional[KnowledgeStore] = ctx.get(KNOWLEDGE_STORE)
         dry_run: bool = ctx.get(DRY_RUN, True)
+        # 领域自适应：缺口识别的 prompt、规则措辞、专用数据源均按研究领域切换
+        domain = str(ctx.get(PROJECT_DOMAIN) or "")
+        _is_materials = (not domain) or domain.strip().lower() in (
+            "materials", "材料", "材料科学", "材料学",
+        )
 
         llm_gaps: list[dict] = []
         data_gaps: list[dict] = []
@@ -2433,8 +2590,9 @@ class ResearchGapIdentifyAgent(AgentNode):
         db_evidence_list: list = []
 
         # 通道 C 前置：材料数据库证据查询（Materials Project / OQMD / NOMAD）
-        # 真实模式才查（dry_run 不访问外部 API），失败优雅降级不阻塞。
-        if not dry_run and store is not None:
+        # 仅材料领域执行（其他领域无对应专用数据库）；真实模式才查（dry_run 不访问
+        # 外部 API），失败优雅降级不阻塞。
+        if _is_materials and not dry_run and store is not None:
             try:
                 from core.tools.materials_db_gap import (
                     collect_material_formulas,
@@ -2458,19 +2616,21 @@ class ResearchGapIdentifyAgent(AgentNode):
         # 通道 A：LLM 语义分析（仅真实模式且 LLM 可用；注入数据库证据）
         if not dry_run and registry is not None:
             try:
-                llm_gaps = self._llm_identify(input_obj, registry, store, db_block)
+                llm_gaps = self._llm_identify(
+                    input_obj, registry, store, db_block, domain=domain,
+                )
             except Exception as e:
                 logger.warning("Research Gap LLM 识别失败，回退规则通道: %s", e)
 
-        # 通道 B：数据驱动断链检测（纯规则，dry_run 与真实模式都执行）
+        # 通道 B：数据驱动断链检测（纯规则，dry_run 与真实模式都执行；措辞按领域画像）
         if store is not None:
             try:
-                data_gaps = self._data_driven_detect(store)
+                data_gaps = self._data_driven_detect(store, domain=domain)
             except Exception as e:
                 logger.warning("Research Gap 数据驱动检测失败: %s", e)
 
-        # 通道 C：数据库驱动缺口检测（规则层，基于三库数据密度）
-        if db_evidence_list and store is not None:
+        # 通道 C：数据库驱动缺口检测（规则层，基于三库数据密度；仅材料领域）
+        if _is_materials and db_evidence_list and store is not None:
             try:
                 from core.tools.materials_db_gap import (
                     build_material_coverage,
@@ -2598,18 +2758,28 @@ class ResearchGapIdentifyAgent(AgentNode):
         registry: LLMRegistry,
         store: Optional[KnowledgeStore],
         db_evidence_block: str = "",
+        domain: str = "",
     ) -> list[dict]:
         """LLM 语义通道：基于交叉验证报告 + 论文摘要 + 领域知识识别缺口。
 
-        新增：注入「材料数据库证据块」（Materials Project / OQMD / NOMAD 数据密度），
-        让 LLM 用数据库定量事实判断哪些方向是真正的数据缺口，而非泛泛推断。
+        领域自适应（按项目研究领域切换语义，不再硬编码材料学科）：
+        - 缺口类型的例子用领域画像的「研究对象/评价指标/方法条件」生成；
+        - 「材料数据库证据块」仅在材料领域且查询成功时注入。
         """
+        _profile = get_domain_profile(domain)
+        _dlabel = _profile["label"]
+        _entity = _profile["entity"]
+        _metric = _profile["metric"]
+        _method = _profile["method"]
+
         report = input_obj.cross_validation_report or {}
         # 基础 gaps（cross_validate 输出的子问题缺口）+ 冲突 + 共识
         base_gaps = report.get("gaps") or []
         conflicts = report.get("conflicts") or []
         consensus = report.get("consensus") or []
         confidence = report.get("overall_confidence", 0.0)
+        # 领域脉络（M2）：交叉验证产出的整体图景，帮助 LLM 在版图中定位缺口
+        landscape = str(report.get("landscape") or "").strip()
 
         # 论文摘要（top 5）
         abstracts_block = ""
@@ -2625,37 +2795,60 @@ class ResearchGapIdentifyAgent(AgentNode):
                     pass
             abstracts_block = "\n\n".join(lines)
 
-        resp = registry.structured_output(
-            task_type=self.task_type,
-            output_schema=ResearchGapReportSchema,
-            system=(
-                "你是材料科学研究缺口分析专家。基于文献调研的交叉验证报告、"
-                "论文摘要与领域知识，识别本领域的研究缺口（Research Gap）。\n"
-                "缺口类型：\n"
-                "- contradiction：文献间矛盾结论（如同一材料性能数值差异大、"
-                "  机理解释不一致）\n"
-                "- unexplored：未被探索的方向（如某材料在特定温度区间/掺杂范围"
-                "  数据缺失、某工艺组合无人尝试）\n"
-                "- missing_link：缺失的知识连接（如性能与晶体结构/合成工艺间"
-                "  缺少关联研究、材料有性能但无对应结构数据）\n"
-                "要求：\n"
-                "1. 每个 Gap 必须能追溯到证据（evidence 至少 1 条，可引用论文标题）\n"
-                "2. 宁缺毋滥：只输出真正有依据的缺口，3-10 条\n"
-                "3. 给出可操作性（能否被后续 ideation/discovery 直接消费）与优先级\n"
-                "4. 关联相关材料与建议行动\n"
+        # 材料数据库证据条款：仅材料领域注入；其他领域给出等价的通用要求
+        if db_evidence_block:
+            db_clause = (
                 "5. 若提示里给出了「材料数据库证据」（三库数据密度），必须据此判断：\n"
                 "   - 三库命中都极低的材料 → 明确标注为数据稀缺（unexplored 或 detail 里说明）；\n"
                 "   - 数据库有计算记录但文献无实验验证的材料 → 标注为「计算有据、实验空白」；\n"
                 "   不要编造数据库未提供的数值，只引用提示里出现的事实。\n"
+            )
+            db_block_line = (
+                f"材料数据库证据（Materials Project / OQMD / NOMAD 数据密度）：\n{db_evidence_block}"
+            )
+        else:
+            db_clause = (
+                "5. 数据充分性判断：缺口必须说明「已有证据覆盖到哪、缺哪一块」"
+                "（如某对象/某条件区间/某对比基线缺数据或缺方法细节），"
+                "不得凭空假设存在某数据库或数据集。\n"
+            )
+            db_block_line = "领域专用数据库证据：（本领域无，按文献证据判断数据充分性）"
+
+        resp = registry.structured_output(
+            task_type=self.task_type,
+            output_schema=ResearchGapReportSchema,
+            system=(
+                f"你是{_dlabel}领域的研究缺口分析专家。基于文献调研的交叉验证报告、"
+                "论文摘要与领域知识，识别本领域的研究缺口（Research Gap）。\n"
+                f"领域语义锚定——研究对象：{_entity}；评价指标：{_metric}；方法条件：{_method}。\n"
+                "缺口类型（按本领域语义理解例子）：\n"
+                "- contradiction：文献间矛盾结论（如同一研究对象的指标数值差异大、"
+                "机理解释不一致）\n"
+                "- unexplored：未被探索的方向（如某研究对象在特定条件区间/参数范围"
+                "内无人研究、某方法组合无人尝试）\n"
+                "- missing_link：缺失的知识连接（如指标与对象结构/方法条件间"
+                "缺少关联研究、有现象无机理解释）\n"
+                "要求：\n"
+                "1. 每个 Gap 必须能追溯到证据（evidence 至少 1 条，可引用论文标题）\n"
+                "2. 宁缺毋滥：只输出真正有依据的缺口，3-10 条\n"
+                "3. 给出可操作性（能否被后续 ideation/discovery 直接消费）与优先级\n"
+                "4. 关联相关研究对象与建议行动\n"
+                + db_clause +
+                "\n【缺口 → 建议方向的转化方法（内部策略）】\n"
+                "为每个 Gap 填写 suggested_actions 时，按下方五大创新套路给出**可落地的具体行动**，\n"
+                "供下游 ideation / discovery 直接消费；不要给出空泛的「进一步研究」类建议。\n"
+                "套路分类仅用于内部约束思考路径，不要在输出文本中向用户解释或标注套路名称。\n\n"
+                f"{INNOVATION_PATTERNS_PROMPT}\n"
             ),
             prompt=(
                 f"交叉验证报告：\n"
                 f"  总体置信度：{confidence}\n"
                 f"  已知缺口（子问题粒度）：{base_gaps}\n"
                 f"  矛盾结论：{json.dumps(conflicts, ensure_ascii=False)[:2000]}\n"
-                f"  共识陈述：{consensus[:10]}\n\n"
-                f"代表性论文摘要：\n{abstracts_block}\n\n"
-                f"材料数据库证据（Materials Project / OQMD / NOMAD 数据密度）：\n{db_evidence_block or '（无）'}"
+                f"  共识陈述：{consensus[:10]}\n"
+                + (f"  领域脉络（已有研究版图）：\n{landscape[:1500]}\n\n" if landscape else "")
+                + f"代表性论文摘要：\n{abstracts_block}\n\n"
+                f"领域专用数据库证据：\n{db_block_line}"
             ),
         )
         gaps: list[dict] = []
@@ -2677,8 +2870,19 @@ class ResearchGapIdentifyAgent(AgentNode):
 
     # ===== 通道 B：数据驱动断链检测（纯规则）=====
 
-    def _data_driven_detect(self, store: KnowledgeStore) -> list[dict]:
-        """数据驱动断链检测：从材料库统计识别缺失知识连接。"""
+    def _data_driven_detect(self, store: KnowledgeStore, domain: str = "") -> list[dict]:
+        """数据驱动断链检测：从知识库「对象-指标-方法」统计识别缺失知识连接。
+
+        措辞按领域画像通用化：材料领域沿用「材料/性能/合成工艺」口径，
+        其他领域用「研究对象/性能与指标/方法与条件」。
+        """
+        _is_materials = (not domain) or domain.strip().lower() in (
+            "materials", "材料", "材料科学", "材料学",
+        )
+        _dlabel = get_domain_profile(domain)["label"]
+        _entity_word = "材料" if _is_materials else "研究对象"
+        _metric_word = "性能" if _is_materials else "性能/指标"
+        _method_word = "合成工艺" if _is_materials else "方法/条件"
         materials = store.list_materials(limit=2000)
         props = store.list_material_properties(limit=5000)
         syns = store.list_material_synthesis(limit=5000)
@@ -2705,19 +2909,18 @@ class ResearchGapIdentifyAgent(AgentNode):
             p = prop_by_mat[m.material_id][0]
             gaps.append(self._make_data_gap(
                 gap_type="missing_link",
-                statement=f"{m.name} 有性能数据但缺少合成工艺记录",
+                statement=f"{m.name} 有{_metric_word}数据但缺少{_method_word}记录",
                 detail=(
-                    f"对象 {m.name} 已有 {len(prop_by_mat[m.material_id])} 条性能数据"
-                    f"（如 {p.property_name}），但库内未检索到其方法/条件"
-                    f"（方法/温度/前驱体等）记录，关系链路在「条件→结构→性能」"
-                    "的源头处断链。"
+                    f"{_entity_word} {m.name} 已有 {len(prop_by_mat[m.material_id])} 条"
+                    f"{_metric_word}数据（如 {p.property_name}），但库内未检索到其方法/条件"
+                    "记录，关系链路在「条件→结构→指标」的源头处断链。"
                 ),
                 materials=[m],
                 actionability="high",
                 priority=1,
                 suggested_actions=[
-                    "补充检索该材料的合成工艺文献",
-                    "将其纳入 discovery 搜索空间的前驱体/工艺变量",
+                    f"补充检索该{_entity_word}的{_method_word}相关文献",
+                    "将其纳入 discovery 搜索空间的方法/条件变量",
                 ],
             ))
 
@@ -2732,19 +2935,19 @@ class ResearchGapIdentifyAgent(AgentNode):
         for m in no_prop[:4]:
             gaps.append(self._make_data_gap(
                 gap_type="missing_link",
-                statement=f"{m.name} 有合成工艺但无性能数据",
+                statement=f"{m.name} 有{_method_word}但无{_metric_word}数据",
                 detail=(
-                    f"材料 {m.name} 已报道合成方法"
+                    f"{_entity_word} {m.name} 已报道方法/条件"
                     f"（{syn_by_mat[m.material_id][0].method}），"
-                    "但缺少性能（ZT/电导率/热导率等）数据，"
-                    "无法评估其热电潜力，存在性能数据缺口。"
+                    f"但缺少{_metric_word}数据，无法评估其研究价值，"
+                    "存在指标数据缺口。"
                 ),
                 materials=[m],
                 actionability="high",
                 priority=2,
                 suggested_actions=[
-                    "检索该材料的热电性能报道",
-                    "用相似结构材料做性能外推作为初始假设",
+                    f"检索该{_entity_word}的{_metric_word}数据报道",
+                    "用相似对象的已知数据做外推作为初始假设",
                 ],
             ))
 
@@ -2759,7 +2962,8 @@ class ResearchGapIdentifyAgent(AgentNode):
                 gap_type="unexplored",
                 statement=f"{m.name} 仅被提及名称，缺乏结构化知识",
                 detail=(
-                    f"材料 {m.name} 在文献中被提及但未抽取到性能与合成信息，"
+                    f"{_entity_word} {m.name} 在文献中被提及但未抽取到"
+                    f"{_metric_word}与{_method_word}信息，"
                     "可能是边缘提及或抽取遗漏，需要人工/补充检索确认其研究价值。"
                 ),
                 materials=[m],

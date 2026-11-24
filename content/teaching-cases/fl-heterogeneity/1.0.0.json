@@ -1,0 +1,325 @@
+{
+  "case_id": "fl-heterogeneity",
+  "version": "1.0.0",
+  "title": "联邦学习：数据差异与公平比较",
+  "domain": "ai",
+  "method": "computational",
+  "organized_on": "2026-10-21",
+  "audience": "科研入门者；不需要模型密钥",
+  "learning_goals": [
+    "缩小问题",
+    "区分事实与设想",
+    "设计比较条件",
+    "审阅并采纳方案"
+  ],
+  "settings": "教学设定：只讨论方案，不执行实验。真实设备、期限、预算和权限待另行确认。",
+  "concepts": {
+    "non_iid": "各客户端数据分布不完全相同；不预设影响大小。",
+    "baseline": "基线是比较起点；公平比较还需要说明其他条件。"
+  },
+  "sources": [
+    {
+      "source_id": "fedavg",
+      "title": "Communication-Efficient Learning of Deep Networks from Decentralized Data",
+      "authors": [
+        "Brendan McMahan",
+        "Eider Moore",
+        "Daniel Ramage",
+        "Seth Hampson",
+        "Blaise Aguera y Arcas"
+      ],
+      "year": 2017,
+      "url": "https://proceedings.mlr.press/v54/mcmahan17a.html",
+      "doi": null,
+      "summary": "论文提出保留设备上训练数据并聚合本地更新的联邦学习方式，讨论迭代模型平均；其结论不能自动推广到所有划分。",
+      "reading_scope": "摘要",
+      "verified_on": "2026-10-21",
+      "facts": [
+        {
+          "claim": "论文提出保留设备上训练数据并聚合本地更新的联邦学习方式，讨论迭代模型平均；其结论不能自动推广到所有划分。",
+          "location": "Abstract 第 2、3 段"
+        }
+      ],
+      "redistribution": "仅自行撰写的中文概述与书目信息；不附原文、图片或 PDF。",
+      "verification_urls": [
+        "https://proceedings.mlr.press/v54/mcmahan17a.html"
+      ]
+    },
+    {
+      "source_id": "fedprox",
+      "title": "Federated Optimization in Heterogeneous Networks",
+      "authors": [
+        "Tian Li",
+        "Anit Kumar Sahu",
+        "Manzil Zaheer",
+        "Maziar Sanjabi",
+        "Ameet Talwalkar",
+        "Virginia Smith"
+      ],
+      "year": 2020,
+      "url": "https://arxiv.org/abs/1812.06127v5",
+      "doi": "10.48550/arXiv.1812.06127",
+      "summary": "摘要区分系统差异与数据分布差异，并介绍 FedProx。论文报告效果依赖其设定，本案例不承诺同样提升。",
+      "reading_scope": "摘要",
+      "verified_on": "2026-10-21",
+      "facts": [
+        {
+          "claim": "摘要区分系统差异与数据分布差异，并介绍 FedProx。论文报告效果依赖其设定，本案例不承诺同样提升。",
+          "location": "arXiv v5 Abstract 前 3 句；年份取 MLSys 2020，初稿 2018"
+        }
+      ],
+      "redistribution": "仅自行撰写的中文概述与书目信息；不附原文、图片或 PDF。",
+      "verification_urls": [
+        "https://arxiv.org/abs/1812.06127v5"
+      ]
+    },
+    {
+      "source_id": "scaffold",
+      "title": "SCAFFOLD: Stochastic Controlled Averaging for Federated Learning",
+      "authors": [
+        "Sai Praneeth Karimireddy",
+        "Satyen Kale",
+        "Mehryar Mohri",
+        "Sashank Reddi",
+        "Sebastian Stich",
+        "Ananda Theertha Suresh"
+      ],
+      "year": 2020,
+      "url": "https://proceedings.mlr.press/v119/karimireddy20a.html",
+      "doi": null,
+      "summary": "摘要在文中理论设定下分析 FedAvg 的客户端漂移，并提出使用控制变量的 SCAFFOLD；这不证明案例比较问题的新颖性。",
+      "reading_scope": "摘要",
+      "verified_on": "2026-10-21",
+      "facts": [
+        {
+          "claim": "摘要在文中理论设定下分析 FedAvg 的客户端漂移，并提出使用控制变量的 SCAFFOLD；这不证明案例比较问题的新颖性。",
+          "location": "Abstract 第 2 段"
+        }
+      ],
+      "redistribution": "仅自行撰写的中文概述与书目信息；不附原文、图片或 PDF。",
+      "verification_urls": [
+        "https://proceedings.mlr.press/v119/karimireddy20a.html"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "key": "orientation",
+      "title": "认识兴趣和案例条件",
+      "why": "兴趣需要缩小，案例条件不等于你的真实条件。",
+      "text": "只做研究方案教学，不执行实验，不保证创新性。",
+      "options": [
+        {
+          "id": "begin",
+          "label": "了解条件，继续",
+          "next": 1
+        },
+        {
+          "id": "explain",
+          "label": "还不理解研究问题",
+          "explanation": "问题需要说清对象、比较因素与可改变判断的证据。兴趣只是范围；解释不会自动采纳问题。"
+        }
+      ]
+    },
+    {
+      "key": "sources",
+      "title": "资料怎样成为依据",
+      "why": "确认资料说了什么、没有说什么。",
+      "text": "以下是预先核验的中文概述，不是实时检索；原文链接可选，离线也能继续。",
+      "options": [
+        {
+          "id": "continue",
+          "label": "比较候选问题",
+          "next": 2
+        },
+        {
+          "id": "explain",
+          "label": "文献事实与设想的区别",
+          "explanation": "事实只在实际阅读范围内转述；案例的比较方案是待验证的建议，不是本系统获得的结果。"
+        }
+      ]
+    },
+    {
+      "key": "question",
+      "title": "选择具体研究问题",
+      "why": "不同问题需要不同的验证设计。",
+      "text": "这里只选择草案，下一步明确采用才保存正式问题。",
+      "options": [
+        {
+          "id": "compare",
+          "label": "相同划分下比较 FedAvg 与 FedProx",
+          "next": 3,
+          "question_key": "compare"
+        },
+        {
+          "id": "shift",
+          "label": "数据差异与 FedAvg 稳定性",
+          "next": 3,
+          "question_key": "shift"
+        },
+        {
+          "id": "wide",
+          "label": "想一次解决整个领域的问题",
+          "explanation": "目标过宽，当前资料不足以支持。请先选择一个具体对象与比较因素；合理路径不只有一种。"
+        }
+      ]
+    },
+    {
+      "key": "confirm",
+      "title": "明确采用教学问题",
+      "why": "把讨论想法与正式主线分开。",
+      "text": "采用问题不等于证明新颖性或可行性。",
+      "options": [
+        {
+          "id": "adopt_question",
+          "label": "采用这个教学研究问题",
+          "next": 4
+        },
+        {
+          "id": "back",
+          "label": "返回比较问题",
+          "next": 2
+        }
+      ]
+    },
+    {
+      "key": "constraint",
+      "title": "选择研究范围",
+      "why": "范围限制应实际改变验证路线。",
+      "text": "以下仅为教学设定；修改后旧方案需复核。",
+      "options": [
+        {
+          "id": "small",
+          "label": "小范围：固定任务和一种划分规则",
+          "next": 5,
+          "scope_key": "small"
+        },
+        {
+          "id": "repeat",
+          "label": "扩展范围：多种划分并规划重复性检查",
+          "next": 5,
+          "scope_key": "repeat"
+        }
+      ]
+    },
+    {
+      "key": "draft",
+      "title": "形成对应方案草案",
+      "why": "把问题、依据、方法和局限组织起来。",
+      "text": "查看预置草案不会自动采纳。",
+      "options": [
+        {
+          "id": "show_plan",
+          "label": "查看对应教学方案草案",
+          "next": 6
+        },
+        {
+          "id": "scope_back",
+          "label": "重新选择范围",
+          "next": 4
+        }
+      ]
+    },
+    {
+      "key": "review",
+      "title": "审阅并采纳方案",
+      "why": "结构完整不等于科学正确。",
+      "text": "可先阅读正文、引用和待讨论事项，再明确采纳；体验完成不代表实验完成。",
+      "options": [
+        {
+          "id": "adopt_plan",
+          "label": "采纳这份教学方案"
+        },
+        {
+          "id": "scope_back",
+          "label": "修改范围并重新审阅",
+          "next": 4
+        },
+        {
+          "id": "back",
+          "label": "返回比较问题",
+          "next": 2
+        }
+      ]
+    }
+  ],
+  "questions": {
+    "compare": {
+      "title": "相同划分下比较 FedAvg 与 FedProx",
+      "content": "固定任务与客户端数据划分时，应怎样公平比较 FedAvg 与 FedProx 的表现和稳定性？不预设哪一种更好。"
+    },
+    "shift": {
+      "title": "数据差异与 FedAvg 稳定性",
+      "content": "保持任务与预算可比时，不同客户端数据分布差异下 FedAvg 的稳定性如何变化？这仍待验证。"
+    }
+  },
+  "scopes": {
+    "small": "小范围：固定任务和一种划分规则",
+    "repeat": "扩展范围：多种划分并规划重复性检查"
+  },
+  "variants": {
+    "compare:small": {
+      "objective": "固定任务与客户端数据划分时，应怎样公平比较 FedAvg 与 FedProx 的表现和稳定性？不预设哪一种更好。",
+      "method": "同一数据划分下比较 FedAvg 与 FedProx，分别记录超参数选择过程。",
+      "validation": "限定一个任务与划分规则，比较学习曲线、稳定性及通信成本。",
+      "details": {
+        "type": "computational",
+        "data_task": "拟用合法公开、规模可控的分类任务，许可与划分待确认。",
+        "baselines": "基线 FedAvg；比较对象 FedProx，不预设获胜。",
+        "comparisons": "任务、划分、参与规则和计算通信预算可比；近端项选择另行记录。",
+        "budget": "教学范围为单任务小范围比较；真实资源上限待确认。",
+        "evaluation": "拟比较学习曲线及稳定性，尚无结果。",
+        "reproducibility": "保存数据许可、划分规则、配置与随机性记录；本案例不运行任务。"
+      }
+    },
+    "compare:repeat": {
+      "objective": "固定任务与客户端数据划分时，应怎样公平比较 FedAvg 与 FedProx 的表现和稳定性？不预设哪一种更好。",
+      "method": "同一数据划分下比较 FedAvg 与 FedProx，分别记录超参数选择过程。",
+      "validation": "对多种划分规划独立重复，报告变动范围，不只挑最好的一次。",
+      "details": {
+        "type": "computational",
+        "data_task": "拟用合法公开、规模可控的分类任务，许可与划分待确认。",
+        "baselines": "基线 FedAvg；比较对象 FedProx，不预设获胜。",
+        "comparisons": "任务、划分、参与规则和计算通信预算可比；近端项选择另行记录。",
+        "budget": "更多划分与重复会增加成本；真实资源上限待确认。",
+        "evaluation": "比较划分之间及重复之间的变化，尚无结果。",
+        "reproducibility": "保存数据许可、划分规则、配置与随机性记录；本案例不运行任务。"
+      }
+    },
+    "shift:small": {
+      "objective": "保持任务与预算可比时，不同客户端数据分布差异下 FedAvg 的稳定性如何变化？这仍待验证。",
+      "method": "仅改变数据划分，保持 FedAvg 与其他条件可比。",
+      "validation": "限定一个任务与划分规则，比较学习曲线、稳定性及通信成本。",
+      "details": {
+        "type": "computational",
+        "data_task": "拟用合法公开、规模可控的分类任务，许可与划分待确认。",
+        "baselines": "FedAvg 在不同划分条件下作为同一基线。",
+        "comparisons": "主要因素为客户端数据划分，不同时任意更换模型和预算。",
+        "budget": "教学范围为单任务小范围比较；真实资源上限待确认。",
+        "evaluation": "拟比较学习曲线及稳定性，尚无结果。",
+        "reproducibility": "保存数据许可、划分规则、配置与随机性记录；本案例不运行任务。"
+      }
+    },
+    "shift:repeat": {
+      "objective": "保持任务与预算可比时，不同客户端数据分布差异下 FedAvg 的稳定性如何变化？这仍待验证。",
+      "method": "仅改变数据划分，保持 FedAvg 与其他条件可比。",
+      "validation": "对多种划分规划独立重复，报告变动范围，不只挑最好的一次。",
+      "details": {
+        "type": "computational",
+        "data_task": "拟用合法公开、规模可控的分类任务，许可与划分待确认。",
+        "baselines": "FedAvg 在不同划分条件下作为同一基线。",
+        "comparisons": "主要因素为客户端数据划分，不同时任意更换模型和预算。",
+        "budget": "更多划分与重复会增加成本；真实资源上限待确认。",
+        "evaluation": "比较划分之间及重复之间的变化，尚无结果。",
+        "reproducibility": "保存数据许可、划分规则、配置与随机性记录；本案例不运行任务。"
+      }
+    }
+  },
+  "unconfirmed": [
+    "本案例问题的创新性未核实",
+    "未阅读论文全文；需补充合法原文后复核方法细节",
+    "设备、期限、预算、数据或材料权限待确认",
+    "未进行训练或实验，没有实测结果"
+  ],
+  "export_notice": "教学案例，使用预先整理的资料；不是实时检索或实验结果。"
+}

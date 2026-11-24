@@ -12,6 +12,9 @@ from typing import Optional
 
 import requests
 
+from core.tools.http import http_get
+from core.tools.search_result import SearchResults
+
 logger = logging.getLogger(__name__)
 
 _OPENALEX_API = "https://api.openalex.org/works"
@@ -95,17 +98,23 @@ def search_openalex(
     if filters:
         params["filter"] = ",".join(filters)
 
+    resp = None
     try:
-        resp = requests.get(_OPENALEX_API, params=params, headers=_HEADERS, timeout=timeout)
+        resp = http_get(_OPENALEX_API, params=params, headers=_HEADERS, timeout=timeout)
         resp.raise_for_status()
-        items = resp.json().get("results", []) or []
-    except (requests.RequestException, ValueError, TypeError) as exc:
+        payload = resp.json()
+        items = payload["results"]
+        if not isinstance(items, list):
+            raise ValueError("results is not a list")
+    except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError) as exc:
         logger.warning("OpenAlex 检索失败（query=%r）: %s", query, exc)
-        return []
+        return SearchResults.failure(exc,resp)
 
     papers: list[OpenAlexPaper] = []
     for item in items:
         try:
+            if not item.get("title"):
+                continue
             primary = item.get("primary_location") or {}
             best_oa = item.get("best_oa_location") or {}
             source = primary.get("source") or {}
@@ -137,4 +146,5 @@ def search_openalex(
             ))
         except (AttributeError, TypeError, ValueError) as exc:
             logger.warning("解析 OpenAlex 论文失败: %s", exc)
-    return papers
+    return SearchResults(papers, response=resp, raw_count=len(items),
+                         parse_errors=len(items)-len(papers), available=(payload.get("meta") or {}).get("count"))

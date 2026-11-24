@@ -348,9 +348,14 @@ body {
     box-shadow: 0 4px 12px rgba(184, 134, 11, 0.35);
 }
 .flow-step.human.active::after {
-    content: "待你确认";
+    content: "当前执行";
     background: rgba(255, 255, 255, 0.22);
 }
+.flow-step.awaiting::after, .flow-step.human.awaiting::after { content: "待你确认"; }
+.flow-step.failed { border-color: var(--color-danger, #b94d4d); color: var(--color-danger, #b94d4d); background: #fff2f1; }
+.flow-step.failed::after { content: "失败位置"; font-size: 10px; }
+.flow-step.viewing { outline: 2px solid var(--color-text-muted); outline-offset: 2px; }
+.flow-step.viewing::before { content: "浏览"; font-size: 10px; opacity: .8; }
 .flow-step-num {
     display: inline-flex;
     align-items: center;
@@ -2227,6 +2232,189 @@ pre.code-block {
     padding: 2px 10px;
     font-size: 12px;
     color: var(--color-text, #333);
+}
+
+/* 创新套路徽章（方向推荐卡片） */
+.rec-pattern-badge {
+    margin-right: 6px;
+    flex-shrink: 0;
+}
+
+/* ===== 论文阅读方法论页 ===== */
+.method-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    padding: 10px 0;
+    background: var(--color-bg, transparent);
+}
+.method-chip {
+    border: 1px solid var(--color-border, #ddd);
+    background: var(--color-bg-alt, #f0f4f8);
+    color: var(--color-text, #333);
+    border-radius: 16px;
+    padding: 6px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+.method-chip:hover {
+    border-color: var(--color-accent, #4a9eff);
+    background: var(--color-accent-soft, rgba(74, 158, 255, 0.12));
+}
+.method-section {
+    margin-bottom: 20px;
+    scroll-margin-top: 60px;
+}
+.method-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    margin: 12px 0;
+}
+.method-grid-3 {
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}
+.method-mini {
+    border: 1px solid var(--color-border, #ddd);
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: var(--color-bg-alt, #f7f9fc);
+}
+.method-mini-title {
+    font-weight: 600;
+    font-size: 13.5px;
+    margin-bottom: 4px;
+}
+.method-mini-desc {
+    line-height: 1.55;
+}
+.method-callout {
+    border-left: 3px solid var(--color-accent, #4a9eff);
+    background: var(--color-bg-alt, #f0f6ff);
+    border-radius: 0 8px 8px 0;
+    padding: 10px 12px;
+    margin: 10px 0;
+    font-size: 13.5px;
+    line-height: 1.65;
+}
+.method-callout.highlight {
+    border-left-color: var(--color-success, #2fae6c);
+    background: var(--color-success-soft, rgba(47, 174, 108, 0.08));
+}
+.method-stage {
+    display: flex;
+    gap: 10px;
+    align-items: baseline;
+    padding: 9px 0;
+    border-bottom: 1px dashed var(--color-border, #ddd);
+}
+.method-stage:last-child {
+    border-bottom: none;
+}
+.method-stage-title {
+    font-weight: 600;
+    font-size: 13.5px;
+    white-space: nowrap;
+    min-width: 150px;
+}
+.method-stage-desc {
+    font-size: 13px;
+    line-height: 1.6;
+}
+.method-funnel {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px;
+    margin: 12px 0;
+}
+.method-step {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    border: 1px solid var(--color-border, #ddd);
+    border-radius: 10px;
+    padding: 10px 12px;
+    background: var(--color-bg-alt, #f7f9fc);
+}
+.method-step-no {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    background: var(--color-accent, #4a9eff);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+.method-priority-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    padding: 10px 0;
+    border-bottom: 1px dashed var(--color-border, #ddd);
+}
+.method-priority-row:last-child {
+    border-bottom: none;
+}
+.method-priority-level {
+    white-space: nowrap;
+    font-weight: 700;
+    font-size: 13px;
+    color: var(--color-accent, #4a9eff);
+    min-width: 92px;
+}
+.rm-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-top: 6px;
+}
+.rm-table th,
+.rm-table td {
+    border: 1px solid var(--color-border, #ddd);
+    padding: 7px 10px;
+    text-align: left;
+    line-height: 1.5;
+}
+.rm-table th {
+    background: var(--color-bg-alt, #f0f4f8);
+    font-weight: 600;
+}
+.rm-table tr:nth-child(even) td {
+    background: var(--color-bg-alt-soft, rgba(240, 244, 248, 0.5));
+}
+
+/* 节点级进度条（paper_fetch 检索进度等） */
+.node-progress {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--color-border, #ddd);
+}
+.node-progress-track {
+    width: 100%;
+    height: 8px;
+    border-radius: 6px;
+    background: var(--color-bg-alt, #eef2f7);
+    border: 1px solid var(--color-border, #ddd);
+    overflow: hidden;
+}
+.node-progress-fill {
+    height: 100%;
+    border-radius: 6px;
+    background: linear-gradient(90deg, var(--color-accent, #4a9eff), #7ab8ff);
+    transition: width 0.6s ease;
+}
+.node-progress-text {
+    margin-top: 6px;
 }
 
 /* ===== 材料知识页增强（Task 2 美化 + Task 3 搜索）===== */
@@ -4975,6 +5163,89 @@ pre.code-block {
 .sens-high { background: #fdeaea; color: #c0392b; }
 .sens-low { background: var(--color-bg-secondary); color: var(--color-text-muted); }
 
+.quick-start-steps { margin: 10px 0; padding-left: 22px; line-height: 1.8; }
+.quick-start-steps li + li { margin-top: 5px; }
+.quick-start-guide p { margin: 8px 0; }
+.continuation-card p { margin: 8px 0; }
+
+/* 紧凑工作台：保留原导航与学术配色，将阅读详情交还给各模块。 */
+.quick-start-guide { border-left: 3px solid var(--color-accent); padding: 14px 18px; }
+.quick-start-heading, .project-library-heading, .project-library-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.quick-start-heading .card-title { margin: 0; }
+.quick-start-details summary, .overview-more > summary, .session-options summary { cursor: pointer; color: var(--color-primary); font-size: 13px; font-weight: 600; }
+.quick-start-details[open] { margin-top: 10px; }
+.continuation-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 20px; padding: 16px 20px; }
+.continuation-card .card-title { grid-column: 1; margin-bottom: 0; }
+.continuation-card p { grid-column: 1; margin: 2px 0; overflow-wrap: anywhere; }
+.continuation-card > button { grid-column: 2; grid-row: 1 / 4; align-self: center; }
+.overview-work-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; margin-bottom: 16px; }
+.overview-work-grid > .card { margin: 0; min-width: 0; padding: 16px; }
+.overview-work-grid .project-goal { font-size: 14px; }
+.overview-work-grid .project-state-grid { gap: 8px; }
+.overview-work-grid .project-task { padding: 9px 10px; }
+.overview-work-grid .project-task p { font-size: 12px; margin: 5px 0; }
+.overview-work-grid .research-flow-steps { gap: 6px; }
+.overview-work-grid .research-flow-steps li { padding: 8px; }
+.overview-shortcuts { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+.overview-shortcut { position: relative; text-align: left; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); padding: 14px; color: var(--color-text); cursor: pointer; font: inherit; }
+.overview-shortcut strong, .overview-shortcut .muted { display: block; padding-right: 8px; }
+.overview-shortcut .muted { margin-top: 6px; font-size: 12px; }
+.overview-shortcut:hover { border-color: var(--color-accent); background: var(--color-accent-soft); }
+.shortcut-arrow { position: absolute; right: 10px; top: 12px; color: var(--color-text-muted); }
+.overview-more { padding: 14px 18px; }
+.overview-more > .card { margin: 14px 0 0; box-shadow: none; }
+.project-setup-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 18px; margin-bottom: 18px; }
+.project-setup-grid > .card { margin: 0; min-width: 0; }
+.project-create-card #topic-input { min-height: 112px; resize: vertical; }
+.project-resume-card .project-id-display { margin-top: 16px; display: flex; flex-wrap: wrap; font-size: 12px; overflow-wrap: anywhere; }
+.project-resume-card #create-result { margin-top: 12px; border-top: 1px solid var(--color-border); }
+.project-resume-card #create-result:empty { display: none; }
+.project-resume-card .field.mt-16 { margin-top: 14px; }
+.session-options { margin: 16px 0; }
+.project-library-heading { margin-bottom: 14px; }
+.project-library-heading .card-title { margin: 0; }
+.project-search { max-width: 360px; }
+.project-selection-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; background: var(--color-surface-alt); padding: 10px 12px; border-radius: var(--radius); }
+.project-selection-bar label { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
+.project-selection-bar [role="status"] { flex: 1; }
+.project-library input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--color-accent); cursor: pointer; flex-shrink: 0; }
+.project-library input:disabled { cursor: not-allowed; }
+.project-library-row { display: flex; align-items: center; gap: 12px; padding: 13px 6px; border-bottom: 1px solid var(--color-border); }
+.project-library-row.current { background: var(--color-accent-soft); }
+.project-row-info { min-width: 0; flex: 1; }
+.project-title-link { display: block; max-width: 100%; background: none; border: 0; padding: 0; text-align: left; cursor: pointer; font: inherit; font-weight: 600; color: var(--color-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-title-link:hover { text-decoration: underline; }
+.project-row-meta { margin-top: 4px; overflow-wrap: anywhere; font-size: 11px; }
+.project-row-actions { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.project-library-footer { margin-top: 14px; }
+.project-library-footer .btn-row { margin: 0; flex-wrap: nowrap; align-items: center; }
+.project-list-empty { padding: 24px 8px; text-align: center; }
+.research-path-state { font-size: 10px; color: var(--color-text-muted); margin-left: 4px; white-space: nowrap; }
+.research-path-steps .flow-step { display: grid; grid-template-columns: 20px auto; column-gap: 6px; row-gap: 2px; padding: 6px 10px; border-radius: 7px; animation: none; box-shadow: none; }
+.research-path-steps .flow-step-num { grid-row: 1 / 3; align-self: center; min-width: 20px; height: 20px; }
+.research-path-steps .flow-step-label { font-size: 12px; }
+.research-path-steps .research-path-state { grid-column: 2; margin-left: 0; text-align: left; }
+.research-path-steps .flow-step.active .research-path-state { color: rgba(255,255,255,.85); }
+.research-path-steps .flow-step.active::after, .research-path-steps .flow-step.viewing::before { content: none; }
+.source-materials > details > summary { cursor: pointer; font-weight: 600; color: var(--color-primary); }
+.source-material { border-top: 1px solid var(--color-border); padding: 10px 0; margin-top: 8px; }
+.source-material > summary { cursor: pointer; font-size: 13px; }
+.source-material pre { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 1150px) {
+    .overview-work-grid, .project-setup-grid { grid-template-columns: minmax(0, 1fr); }
+    .overview-shortcuts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 700px) {
+    .quick-start-heading, .project-library-heading, .project-library-footer { align-items: stretch; flex-direction: column; }
+    .quick-start-heading .btn { align-self: flex-start; }
+    .continuation-card { grid-template-columns: minmax(0, 1fr); }
+    .continuation-card > button { grid-column: 1; grid-row: auto; justify-self: start; margin-top: 8px; }
+    .overview-shortcuts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .project-search { max-width: none; }
+    .project-library-row { flex-wrap: wrap; }
+    .project-row-actions { flex-basis: 100%; padding-left: 28px; flex-wrap: wrap; }
+}
+
 /* 工艺-结构-性质-性能链路 */
 .ppl-list { display: flex; flex-direction: column; gap: 10px; }
 .ppl-item { border: 1px solid var(--color-border); border-radius: var(--radius); padding: 10px 12px; }
@@ -4999,3 +5270,22 @@ pre.code-block {
     .ppl-target { background: rgba(46, 160, 92, 0.18); color: #7ee2a8; }
     .route-goal-reason { background: rgba(255, 255, 255, 0.06); }
 }
+/* Local account entry, deliberately separate from the existing workbench. */
+.account-gate {height:100dvh;overflow:auto;display:grid;place-items:center;background:#eef2f7;padding:24px;box-sizing:border-box}
+.account-gate[hidden],.app[hidden],#account-controls[hidden] {display:none!important}
+.account-card {width:min(100%,390px);padding:30px;border-radius:14px;background:#fff;color:#19324f;box-shadow:0 12px 40px #1832511c;display:grid;gap:14px}
+.account-card h1 {margin:0;font-size:25px}.account-card p {margin:0;color:#56677a}
+.account-card label {display:grid;gap:6px;font-size:14px}.account-card input {box-sizing:border-box;width:100%;padding:11px;border:1px solid #aebdcb;border-radius:7px;font:inherit}
+.account-card button {border:0;border-radius:7px;background:#173d66;color:#fff;padding:12px;font:inherit;cursor:pointer}
+#account-controls {display:grid;gap:5px;margin-top:8px;color:#c6d5e5;font-size:12px;overflow-wrap:anywhere}
+#account-logout {justify-self:start;background:transparent;border:1px solid #92a9c2;color:inherit;border-radius:5px;padding:4px 9px;cursor:pointer}
+.account-card [hidden] {display:none!important}
+.account-card .account-switch {background:transparent;color:#173d66;border:1px solid #bccbdb;padding:9px}
+.account-card .account-help {font-size:12px;line-height:1.65;color:#52677e}
+.account-password-field {display:grid;gap:6px}
+.account-password-control {position:relative}
+.account-card .account-password-control input {padding-right:51px}
+.account-card .account-password-toggle {position:absolute;right:1px;top:1px;bottom:1px;width:44px;padding:0;display:grid;place-items:center;border-radius:0 6px 6px 0;background:transparent;color:#52677e}
+.account-card .account-password-toggle:hover {background:#edf3f9;color:#173d66}
+.account-card .account-password-toggle:focus-visible {outline:2px solid #32679c;outline-offset:2px}
+.account-password-toggle[aria-pressed="false"] .password-eye-slash {display:none}

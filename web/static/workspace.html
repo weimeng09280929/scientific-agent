@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>科研工作台 · Research Workspace</title>
+    <link rel="stylesheet" href="/static/workspace.css">
+    <link rel="stylesheet" href="/static/research-document.css">
+    <script src="/static/vendor/marked/marked.min.js" defer></script>
+    <script src="/static/vendor/dompurify/purify.min.js" defer></script>
+    <script src="/static/research-document.js" defer></script>
+    <script src="/static/vendor/mathjax/tex-svg-full.js" defer></script>
+    <script src="/static/workspace.js" defer></script>
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="/workspace"><span class="brand-symbol">研</span><span>科研工作台<small>从问题出发，让证据落地</small></span></a>
+        <div class="project-tools">
+            <label class="sr-only" for="project-select">当前项目</label>
+            <select id="project-select"><option value="">选择项目</option></select>
+            <button id="new-project" type="button">新建项目</button>
+            <a href="/" class="quiet-link" target="_blank" rel="noopener">现有功能 ↗</a>
+        </div>
+    </header>
+    <div class="layout">
+        <aside class="navigation">
+            <div class="eyebrow">研究空间</div>
+            <nav id="workspace-nav" aria-label="研究工作区"></nav>
+            <div class="nav-note">可以随时回到前面的工作。修改研究记录后，相关内容会提醒你重新核对。</div>
+            <div class="exports" id="exports" hidden></div>
+            <details class="capabilities"><summary>本轮接入情况</summary><div id="capabilities"></div></details>
+            <span class="version">框架版 0.1 · 分步建设中</span>
+        </aside>
+        <main id="workspace-content" tabindex="-1"></main>
+        <aside class="guide-panel" aria-label="科研指导">
+            <div class="guide-heading"><div><span class="eyebrow">与你一起推进</span><h2>科研指导</h2></div><span class="mode-tag" id="guide-mode">准备就绪</span></div>
+            <p class="guide-description">结合当前项目和你选中的材料讨论。合适的建议可以采纳到研究记录。</p>
+            <label class="reading-purpose" id="reading-purpose-label" hidden>本次阅读目的
+                <select id="reading-purpose">
+                    <option value="orientation">了解方向</option>
+                    <option value="method">理解方法</option>
+                    <option value="comparison">寻找基线</option>
+                    <option value="innovation">寻找切入点</option>
+                    <option value="troubleshooting">解决实验问题</option>
+                </select>
+            </label>
+            <div id="guide-context" class="context-chips"></div>
+            <div id="guide-starters" class="starter-list"></div>
+            <button id="guide-latest" class="latest-message" type="button">查看最新对话 ↓</button>
+            <div id="guide-messages" class="messages" role="log" aria-label="科研指导对话记录" tabindex="0" aria-live="polite"></div>
+            <form id="guide-form" class="guide-form">
+                <label class="sr-only" for="guide-input">向科研指导提问</label>
+                <textarea id="guide-input" maxlength="6000" rows="4" placeholder="例如：这篇论文的局限，能成为我的研究问题吗？"></textarea>
+                <div class="guide-bottom"><span>Ctrl / ⌘ + Enter 发送</span><button class="primary" id="guide-send" type="submit">发送</button></div>
+            </form>
+        </aside>
+    </div>
+    <dialog id="create-dialog">
+        <form id="create-form">
+            <h2>从一个研究兴趣开始</h2>
+            <p class="muted">可以先写“联邦学习”，之后再一起收敛。</p>
+            <label>研究兴趣或项目主题<input name="topic" required maxlength="200" placeholder="联邦学习"></label>
+            <label>研究领域<select name="domain"><option value="computer_science">软件工程与计算机系统</option><option value="ai">AI 与机器学习</option><option value="security">计算机安全与隐私</option><option value="engineering">工程与技术</option><option value="materials">材料科学</option><option value="physics">物理学</option><option value="chemistry">化学</option><option value="energy">能源</option><option value="mathematics">数学</option></select></label>
+            <p class="muted">当前开放理工科研究方案规划，不执行实验，不提供临床、人体、药物、湿实验或危险操作指导。安全测试须明确授权。领域不决定研究方法。</p>
+            <div class="button-row"><button type="button" id="close-dialog">取消</button><button type="submit" class="primary">创建项目</button></div>
+        </form>
+    </dialog>
+    <div id="notification" role="status" hidden></div>
+</body>
+</html>

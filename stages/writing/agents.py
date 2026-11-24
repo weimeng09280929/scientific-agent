@@ -37,7 +37,8 @@ from core.knowledge import (
 )
 from core.llm import LLMRegistry
 from core.llm.base import LLMError
-from core.orchestration.context import ExecutionContext
+from core.knowledge.writing_methodology import WRITING_P0_PREFIX
+from core.orchestration.context import ContextKey, ExecutionContext
 from core.orchestration.node import (
     AgentNode,
     HumanNode,
@@ -52,6 +53,8 @@ from core.orchestration.node import (
 from stages.common import (
     ARTIFACT_MANAGER,
     DESIGN_CLAIM_IDS,
+    DESIGN_METHOD_CONTENT,
+    RESEARCH_TOPIC,
     DRY_RUN,
     EXPERIMENT_RESULT_ARTIFACT_IDS,
     KNOWLEDGE_STORE,
@@ -61,6 +64,8 @@ from stages.common import (
     WRITING_OUTLINE,
     WRITING_PAPER_DRAFT_ARTIFACT_ID,
     WRITING_REVIEW_NOTES,
+    EXPERIMENT_OUTCOME,
+    EXPERIMENT_IDS,
     WRITING_SECTIONS,
     WRITING_STYLE_PROFILE,
 )
@@ -210,11 +215,17 @@ class ProvenanceCheckTool(ToolNode):
             )
 
         # 逐个 artifact 调用 validate_for_writing，捕获 ProvenanceError
+        if not input_obj.result_artifact_ids:
+            return NodeResult(status=NodeStatus.FAILED, error="尚无已保存的实际实验结果，不能生成实验结果稿", summary="请先完成实验并回填实际结果；提纲可在成果写作中单独整理")
+        report_mode = bool(ctx.get(EXPERIMENT_OUTCOME, {}).get("ready_for_writing"))
         failed_ids: list[str] = []
         failure_reasons: list[str] = []
         for artifact_id in input_obj.result_artifact_ids:
             try:
-                validator.validate_for_writing(artifact_id)
+                if report_mode:
+                    validator.validate_for_writing(artifact_id, results_report=True)
+                else:
+                    validator.validate_for_writing(artifact_id)
             except ProvenanceError as e:
                 failed_ids.append(artifact_id)
                 failure_reasons.append(str(e))
@@ -244,8 +255,8 @@ class ProvenanceCheckTool(ToolNode):
             status=NodeStatus.SUCCESS,
             output=output,
             summary=(
-                f"溯源链校验通过：{len(input_obj.result_artifact_ids)} 个 artifact "
-                f"全部满足 writing 阶段要求（Claim 已 VERIFIED + Experiment 已 COMPLETED）"
+                f"溯源引用检查通过：{len(input_obj.result_artifact_ids)} 份实际结果。"
+                "写作须区分研究设想、用户判断、负面结果与实际指标；引用存在不代表创新成立。"
             ),
         )
 
@@ -287,6 +298,7 @@ class StyleLearnAgent(AgentNode):
                     task_type=self.task_type,
                     output_schema=StyleLearnSchema,
                     system=(
+                        f"{WRITING_P0_PREFIX}\n\n"
                         "你是学术写作风格分析助手。基于参考样本与目标会议惯例，"
                         "提取写作风格特征：句式偏好（被动/主动）、术语密度、"
                         "章节结构（IMRaD 或变体）、引用风格、段落长度。"
@@ -376,6 +388,15 @@ class OutlineAgent(AgentNode):
         registry: Optional[LLMRegistry] = ctx.get(LLM_REGISTRY)
         store: Optional[KnowledgeStore] = ctx.get(KNOWLEDGE_STORE)
         dry_run: bool = ctx.get(DRY_RUN, True)
+        outcome = ctx.get(EXPERIMENT_OUTCOME, {}) or {}
+        if not dry_run and outcome.get("ready_for_writing") and not outcome.get("success"):
+            from core.writing_report import REPORT_STYLE, build_results_outline
+            try:
+                outline = build_results_outline(store,input_obj.claim_ids,ctx.get(EXPERIMENT_IDS,[]),ctx.get(RESEARCH_TOPIC,""))
+            except ValueError as error:
+                return NodeResult(status=NodeStatus.FAILED,error=str(error),summary="结果报告缺少实际指标，未生成研究结论")
+            ctx.set(WRITING_STYLE_PROFILE,REPORT_STYLE)
+            return NodeResult(status=NodeStatus.SUCCESS,output=OutlineOutput(outline=outline),summary="已按实际材料组织中文结果报告结构（非创新证明），后续正文仍须模型撰写和人工确认")
 
         if not dry_run and registry is not None:
             try:
@@ -385,20 +406,26 @@ class OutlineAgent(AgentNode):
                     task_type=self.task_type,
                     output_schema=OutlineSchema,
                     system=(
+                        f"{WRITING_P0_PREFIX}\n\n"
                         "你是论文结构规划师。借鉴 AI-Researcher 的层级式生成思想，"
                         "在写作前先确定整体大纲。要求：\n"
                         "1. 5-7 个章节，每章关联明确的 claim_ids，覆盖所有提供的 Claim\n"
                         "2. 章节组织符合目标会议风格 profile（IMRaD 或变体）\n"
                         "3. total_target_word_count 符合会议篇幅要求（一般 8000-10000 字）\n"
-                        "4. abstract 基于核心 Claim 与实验结果一句话概括"
+                        "4. abstract 基于核心 Claim 与实验结果一句话概括\n"
+                        "5. 骨架先行：每节先明确「要回答的问题 + 所需证据」；"
+                        "贡献、章节、证据三者必须能对上，对不上的标为待核实。允许负面或无法定论的结果稿，不能把未验证/被反驳论断写成正面贡献。"
                     ),
                     prompt=(
+                        f"研究主题：{ctx.get(RESEARCH_TOPIC, '')}\n已审核方法：{ctx.get(DESIGN_METHOD_CONTENT, '')[:20000]}\n"
                         f"可用 Claim：\n{claim_briefs or '（无 Claim）'}\n\n"
-                        f"实验结果 artifact_ids：{input_obj.result_artifact_ids}\n\n"
+                        f"实际结果素材：{SectionDraftAgent._load_experiments(store, input_obj.result_artifact_ids)}\n\n"
                         f"风格 profile：{input_obj.style_profile}"
                     ),
                 )
                 sections = [s.model_dump() for s in result.sections]
+                if not sections:
+                    raise ValueError("模型没有返回写作提纲")
                 # 兜底：确保所有 Claim 都被某章引用
                 self._ensure_claim_coverage(sections, input_obj.claim_ids)
                 outline = {
@@ -407,9 +434,10 @@ class OutlineAgent(AgentNode):
                     "total_target_word_count": result.total_target_word_count,
                 }
             except (LLMError, Exception) as e:
-                logger.warning("Outline 真实调用失败，回退占位: %s", e)
-                outline = self._placeholder(input_obj.claim_ids)
+                return NodeResult(status=NodeStatus.FAILED, error=f"提纲生成失败：{type(e).__name__}", summary="写作提纲尚未生成，未使用占位内容")
         else:
+            if not dry_run:
+                return NodeResult(status=NodeStatus.FAILED, error="模型未连接", summary="无法生成写作提纲，请先配置可用模型")
             outline = self._placeholder(input_obj.claim_ids)
 
         output = OutlineOutput(outline=outline)
@@ -548,38 +576,43 @@ class SectionDraftAgent(AgentNode):
                     task_type=self.task_type,
                     output_schema=SectionDraftList,
                     system=(
+                        f"{WRITING_P0_PREFIX}\n\n"
                         "你是科研论文撰写助手。借鉴 AI-Researcher 按章填充思想，"
                         "基于大纲逐章生成内容。\n"
                         "要求：\n"
                         "1. 严格按大纲 sections 顺序与标题撰写，每章引用其 claim_ids 标注的 Claim\n"
-                        "2. 利用 1M 上下文一次性装载全部素材，保持全文事实一致\n"
+                        "2. 仅使用本次实际提供的材料，不能声称读过未提供的原文，保持全文事实一致\n"
                         "3. 风格遵循 style_profile\n"
                         "4. 每章字数接近 target_word_count\n"
-                        "5. 章节正文用 Markdown 格式，公式用 $...$ 包裹"
+                        "5. 章节正文用 Markdown 格式，公式用 $...$ 包裹\n"
+                        "6. 证据先于文字：每个论断须能对应到 Claim/实验证据；"
+                        "证据不足的表述明确标为「推断」或「待核实」，不掩饰缺口；"
+                        "先写最熟、最不费脑的章节，摘要与标题最后写。用户的支持/反驳判断不等于系统独立复现，必须保留负面和无法定论结果。"
+                        "sections 中 title 必须逐字对应大纲，一节一个，不重复、遗漏或额外添加章节。"
+                        "复现/验收项目请输出简洁报告，全文控制在2500汉字及必要数据表以内，不预设方法优胜，不编造显著性或理论保证。"
+                        "若大纲mode为results_report，只能写结果记录；未验证claim不得成为贡献或理论事实，也不得虚构数字引用、作者、图表、数据集或已完成的额外实验。"
                     ),
                     prompt=(
                         f"大纲：\n{self._format_outline(outline_sections)}\n\n"
                         f"全部 Claim 素材：\n{claim_context or '（无）'}\n\n"
                         f"实验结果素材：\n{exp_context or '（无）'}\n\n"
+                        f"已审核的方法与执行协议：\n{ctx.get(DESIGN_METHOD_CONTENT, '')[:20000]}\n\n"
                         f"风格 profile：{input_obj.style_profile}"
+                        f"\n用户本轮修改要求：{ctx.get(ContextKey[str]('writing.revision_direction'), '')}"
                     ),
                 )
                 sections = [s.model_dump() for s in result.sections]
-                # 兜底：若 LLM 漏掉章节，按大纲补齐占位
-                if len(sections) < len(outline_sections):
-                    existing_titles = {s.get("title") for s in sections}
-                    for sec in outline_sections:
-                        if sec.get("title") not in existing_titles:
-                            sections.append({
-                                "title": sec.get("title", "未命名章节"),
-                                "content": f"（占位：{sec.get('title', '')}）",
-                                "word_count": sec.get("target_word_count", 1000),
-                            })
-                draft_content = self._assemble_draft(sections, (input_obj.outline or {}).get("abstract", ""))
+                expected = [s.get("title") for s in outline_sections]
+                by_title = {s["title"]: s for s in sections}
+                if len(by_title) != len(sections) or set(by_title) != set(expected) or any(not s.get("content", "").strip() for s in sections):
+                    raise ValueError("模型遗漏章节、重复章节或正文为空")
+                sections = [by_title[title] for title in expected]
+                draft_content = self._assemble_draft(sections, (input_obj.outline or {}).get("abstract", ""), (input_obj.outline or {}).get("mode") == "results_report")
             except (LLMError, Exception) as e:
-                logger.warning("SectionDraft 真实调用失败，回退占位: %s", e)
-                sections, draft_content = self._placeholder(outline_sections)
+                return NodeResult(status=NodeStatus.FAILED, error=f"正文生成失败：{type(e).__name__}", summary="正文生成未完成，已有材料保留，未以占位章节冒充完成")
         else:
+            if not dry_run:
+                return NodeResult(status=NodeStatus.FAILED, error="模型未连接或提纲为空", summary="无法生成正文，请先检查提纲与模型配置")
             sections, draft_content = self._placeholder(outline_sections)
 
         output = SectionDraftOutput(
@@ -592,7 +625,7 @@ class SectionDraftAgent(AgentNode):
             output=output,
             summary=(
                 f"按章撰写完成：{len(sections)} 章，全文约 {total_wc} 字"
-                "（1M 上下文装载全部素材）"
+                "（基于本次提供的方法与实测材料）"
             ),
         )
 
@@ -625,10 +658,10 @@ class SectionDraftAgent(AgentNode):
             try:
                 art = store.get_artifact(aid)
                 if art is not None:
-                    parts.append(
-                        f"- EXPERIMENT_RESULT artifact [{aid}] type={art.artifact_type} "
-                        f"title={art.title}"
-                    )
+                    parts.append(f"- 实际结果 [{aid}]：{art.title}\n{art.content or ''}")
+                    for exp_id in art.cites_experiment_ids:
+                        exp = store.get_experiment(exp_id)
+                        parts.append(f"实验 {exp.name}，运行状态={exp.status.value}，实际指标={json.dumps(exp.metrics, ensure_ascii=False)}\n{exp.result_summary or ''}")
             except Exception:
                 parts.append(f"- artifact {aid}（无法加载）")
         return "\n".join(parts)
@@ -646,10 +679,10 @@ class SectionDraftAgent(AgentNode):
         return "\n".join(lines)
 
     @staticmethod
-    def _assemble_draft(sections: list[dict], abstract: str) -> str:
-        parts: list[str] = ["# 论文草稿"]
+    def _assemble_draft(sections: list[dict], abstract: str, results_report: bool = False) -> str:
+        parts: list[str] = ["# 科研结果验收报告" if results_report else "# 论文草稿"]
         if abstract:
-            parts.append(f"\n## Abstract\n\n{abstract}")
+            parts.append(f"\n## 摘要\n\n{abstract}")
         for s in sections:
             parts.append(f"\n## {s.get('title', '')}\n\n{s.get('content', '')}")
         return "\n".join(parts)
@@ -716,11 +749,15 @@ class ReviewAgent(AgentNode):
                     task_type=self.task_type,
                     output_schema=ReviewSchema,
                     system=(
+                        f"{WRITING_P0_PREFIX}\n\n"
                         "你是资深审稿人。从三维度审阅论文草稿并给出修改意见：\n"
                         "1. 结构（structure, 0~5 分）：章节组织、论证逻辑连贯性\n"
                         "2. 引证（citation, 0~5 分）：Claim 引证充分性、证据链完整性\n"
                         "3. 表达（expression, 0~5 分）：术语使用、句式风格、清晰度\n"
-                        "每维度给出分数、问题清单与具体修改建议，最后给总体意见。"
+                        "每维度给出分数、问题清单与具体修改建议，最后给总体意见。\n"
+                        "自检审计要求：逐条核对「贡献是否被正文与证据支撑」"
+                        "（摘要/引言/结论的表述是否一致），"
+                        "列出无证据或过度外推的具体句子，并按严重程度（fatal/major/minor）排序。"
                     ),
                     prompt=(
                         f"论文草稿：\n{input_obj.draft_content[:8000]}\n\n"
@@ -729,9 +766,10 @@ class ReviewAgent(AgentNode):
                 )
                 review_notes = self._format_review(result)
             except (LLMError, Exception) as e:
-                logger.warning("Review 真实调用失败，回退占位: %s", e)
-                review_notes = self._placeholder()
+                return NodeResult(status=NodeStatus.FAILED, error=f"稿件检查失败：{type(e).__name__}", summary="稿件检查未完成，草稿保留，未生成虚假审稿意见")
         else:
+            if not dry_run:
+                return NodeResult(status=NodeStatus.FAILED, error="模型未连接或草稿为空", summary="尚未完成稿件检查")
             review_notes = self._placeholder()
 
         output = ReviewOutput(review_notes=review_notes)
@@ -801,12 +839,30 @@ class ReviseHuman(HumanNode):
         "paper_draft_artifact_id": WRITING_PAPER_DRAFT_ARTIFACT_ID,
     }
 
+    def continue_after_human(self, response: HumanResponse, ctx: ExecutionContext) -> NodeResult:
+        if response.action == "abort":
+            return super().continue_after_human(response, ctx)
+        text = (response.text or "").strip()
+        if response.action == "continue" and text.lower() in ("confirm", "确认", "ok", "y", "yes"):
+            try:
+                return super().continue_after_human(response, ctx)
+            except Exception as exc:
+                return NodeResult(status=NodeStatus.FAILED, error=f"稿件保存失败：{type(exc).__name__}", summary="稿件没有成功保存，未生成虚假产物编号；已有草稿保留，可重试")
+        if text:
+            ctx.set(ContextKey[str]("writing.revision_direction"), text)
+            for node in (SectionDraftAgent("section_draft"), ReviewAgent("review")):
+                result = node.run(ctx)
+                if result.status != NodeStatus.SUCCESS:
+                    return result
+        return self.run(ctx)
+
     def _build_input(self, ctx: ExecutionContext) -> NodeInput:
         return NodeInput()
 
     def _render_prompt(self, ctx: ExecutionContext) -> str:
         review_notes = ctx.get(WRITING_REVIEW_NOTES, "")
         return (
+            f"待确认稿件全文（未确认草稿）：\n{ctx.get(WRITING_DRAFT_CONTENT, '')}\n\n"
             f"审稿意见如下：\n{review_notes}\n\n"
             "请确认修改方向：\n"
             "  - 输入 'confirm' 接受当前草稿并产出最终论文稿 PAPER_DRAFT Artifact\n"
@@ -826,16 +882,20 @@ class ReviseHuman(HumanNode):
         paper_draft_id = ""
 
         # 真实模式：用户确认后通过 ArtifactManager 创建带版本的 PAPER_DRAFT Artifact
-        if confirmed and not dry_run and manager is not None:
+        if confirmed and not dry_run:
+            if manager is None:
+                raise ValueError("产物管理器未连接")
             try:
                 draft_content = ctx.get(WRITING_DRAFT_CONTENT, "")
+                if not draft_content.strip():
+                    raise ValueError("草稿为空")
                 claim_ids = ctx.get(DESIGN_CLAIM_IDS, [])
                 artifact: Artifact = manager.create_artifact(
                     artifact_type=ArtifactType.PAPER_DRAFT,
                     title="论文终稿",
                     content=draft_content,
                     cites_claim_ids=claim_ids,
-                    cites_experiment_ids=[],
+                    cites_experiment_ids=ctx.get(EXPERIMENT_IDS, []),
                     source_stage="writing",
                     created_by="writing_revise",
                 )
@@ -845,12 +905,11 @@ class ReviseHuman(HumanNode):
                     paper_draft_id,
                     len(claim_ids),
                 )
-            except Exception as e:
-                logger.warning("创建 PAPER_DRAFT Artifact 失败，回退到 ID 占位: %s", e)
-                paper_draft_id = KnowledgeStore.new_id()
+            except Exception:
+                raise
         else:
             # dry_run 或未确认：用静态方法生成合法 ID（不真实入库）
-            paper_draft_id = KnowledgeStore.new_id()
+            paper_draft_id = KnowledgeStore.new_id() if confirmed and dry_run else ""
 
         return ReviseOutput(
             confirmed=confirmed,

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -54,24 +55,29 @@ def check_api_routes() -> dict[str, Any]:
     from web.api import app
 
     # 用 (path, method) 集合，path 已是 FastAPI 模板（含 {project_id}）
-    routes = set()
-    for r in app.routes:
-        if not hasattr(r, "methods"):
-            continue
-        for m in r.methods:
-            routes.add((r.path, m))
+    # 新版 FastAPI 延迟展开 include_router；直接遍历 app.routes 会漏掉子路由。
+    routes = {
+        (path, method.upper())
+        for path, operations in app.openapi()["paths"].items()
+        for method in operations
+        if method.lower() in {"get", "post", "put", "patch", "delete", "head", "options"}
+    }
 
     expected = [
         ("/api/projects", "GET"),
-        ("/api/projects/{project_id}", "GET"),
-        ("/api/projects/{project_id}/start", "POST"),
-        ("/api/projects/{project_id}/discovery", "POST"),
+        ("/api/projects/{project_id}/status", "GET"),
+        ("/api/projects/{project_id}/run", "POST"),
+        ("/api/projects/{project_id}/run-topic-discovery", "POST"),
         ("/api/projects/{project_id}/papers", "GET"),
         ("/api/projects/{project_id}/claims", "GET"),
         ("/api/projects/{project_id}/experiments", "GET"),
         ("/api/projects/{project_id}/upload-paper", "POST"),
         ("/api/projects/{project_id}/upload-topic", "POST"),
         ("/api/projects/{project_id}/download/{artifact_type}", "GET"),
+        ("/api/projects/{project_id}/experiments/backfill", "POST"),
+        ("/api/projects/{project_id}/workspace", "GET"),
+        ("/api/projects/{project_id}/research-materials", "GET"),
+        ("/workspace", "GET"),
         ("/", "GET"),
     ]
 
@@ -96,7 +102,7 @@ def check_artifact_types() -> dict[str, Any]:
         "research-report": "md/docx/pdf",
         "ideas-summary": "md/docx/pdf",
         "method-doc": "md/docx/pdf",
-        "experiment-code": "py（仅源码）",
+        "experiment-tasks": "md/docx/pdf（实验任务，不冒充可执行代码）",
         "experiment-results": "md/docx/pdf",
         "claims-summary": "md/docx/pdf",
         "discovery-report": "md/docx/pdf",
@@ -169,7 +175,7 @@ def check_frontend_endpoints() -> dict[str, Any]:
     """前端调用的 API 端点（grep app.js 验证）。"""
     print(_section("4. 前端 API 调用完整性"))
     from pathlib import Path as P
-    app_js = P("web/static/app.js")
+    app_js = ROOT / "web/static/app.js"
     if not app_js.exists():
         print(_fail("app.js 不存在"))
         return {"matched": 0, "total": 0}
@@ -178,13 +184,14 @@ def check_frontend_endpoints() -> dict[str, Any]:
     # 前端常见的 API 路径
     api_patterns = [
         "/api/projects",
-        "/api/projects/.*start",
-        "/api/projects/.*discovery",
+        "/api/projects/[^`\\n]+/run",
+        "/api/projects/.*run-topic-discovery",
         "/api/projects/.*papers",
         "/api/projects/.*claims",
         "/api/projects/.*experiments",
-        "/api/projects/.*ideas",
-        "/api/projects/.*relationships",
+        "/api/projects/.*workspace",
+        "/api/projects/.*research-materials",
+        "/api/projects/.*experiments/backfill",
         "/api/projects/.*upload-paper",
         "/api/projects/.*upload-topic",
         "/api/projects/.*download",
@@ -192,13 +199,7 @@ def check_frontend_endpoints() -> dict[str, Any]:
     ]
     passed = 0
     for pattern in api_patterns:
-        # 直接检测路径段是否出现在 content 中（不依赖 .* 替换）
-        normalized = pattern.replace(".*", "{project_id}")
-        # 同时尝试 /{project_id}/ 形式
-        if (normalized in content or
-            normalized.replace("{project_id}", f"/{os.getpid()}/") in content or
-            # 检查最后一段路径
-            any(seg in content for seg in normalized.split("/{project_id}/"))):
+        if re.search(pattern, content):
             passed += 1
             print(_ok(f"前端调用: {pattern}"))
         else:
@@ -267,11 +268,11 @@ def main() -> int:
     color = C.GREEN if pct >= 80 else C.YELLOW if pct >= 60 else C.RED
     print(f"\n  {'合计':20s}  {color}{pct:.0f}%{C.RESET} ({total_ok}/{total})")
 
-    if pct >= 80:
+    if total_ok == total:
         print(f"\n{C.GREEN}{C.BOLD}✓ API 验证通过{C.RESET}\n")
         return 0
     print(f"\n{C.YELLOW}{C.BOLD}⚠ API 验证部分通过{C.RESET}\n")
-    return 0
+    return 1
 
 
 if __name__ == "__main__":

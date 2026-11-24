@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS evidence_log (
     evidence_score REAL DEFAULT 0.0,
     snippet TEXT,
     match_type TEXT DEFAULT '',
+    extra_json TEXT DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_evlog_paper ON evidence_log(paper_id);
@@ -188,11 +189,14 @@ CREATE TABLE IF NOT EXISTS kv_store (
 class KnowledgeStore:
     """知识库存储。线程安全（每线程独立连接，写操作加锁）。"""
 
-    def __init__(self, db_path: Path):
-        self._db_path = db_path
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db_path: Path, *, read_only: bool = False, initialize: bool = True):
+        self._db_path = Path(db_path)
+        self._read_only = read_only
+        self._existing_only = not initialize
         self._lock = threading.RLock()
-        self._init_schema()
+        if not read_only and initialize:
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._init_schema()
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
@@ -206,10 +210,24 @@ class KnowledgeStore:
                 conn.execute(
                     "ALTER TABLE evidence_log ADD COLUMN match_type TEXT DEFAULT ''"
                 )
+            # 轻量迁移：旧库 evidence_log 无 extra_json 列时补列——
+            # 用于携带 DOI/arXiv ID/URL/PDF 直链等标识，手动补录下载必需
+            if "extra_json" not in cols:
+                conn.execute(
+                    "ALTER TABLE evidence_log ADD COLUMN extra_json TEXT DEFAULT ''"
+                )
 
     @contextmanager
     def _connect(self) -> Generator[sqlite3.Connection, None, None]:
-        conn = sqlite3.connect(self._db_path, timeout=30.0)
+        # Browsing conversations must not initialize or migrate legacy knowledge
+        # tables. mode=ro also prevents accidental writes and missing-DB creation.
+        conn = (
+            sqlite3.connect(self._db_path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30.0)
+            if self._read_only else (
+                sqlite3.connect(self._db_path.resolve().as_uri() + "?mode=rw", uri=True, timeout=30.0)
+                if self._existing_only else sqlite3.connect(self._db_path, timeout=30.0)
+            )
+        )
         conn.row_factory = sqlite3.Row
         try:
             yield conn
@@ -395,6 +413,14 @@ class KnowledgeStore:
                 raise StoreError(f"Experiment 不存在: {exp_id}")
             return Experiment.model_validate_json(row["content"])
 
+    def save_experiments_batch(self, experiments: list[Experiment]) -> None:
+        """同一次回填在一个事务中保存，任一项失败时整批回滚。"""
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO experiments (experiment_id, content, status, created_at) VALUES (?, ?, ?, ?)",
+                [(e.experiment_id, e.model_dump_json(), e.status.value, e.created_at.isoformat()) for e in experiments],
+            )
+
     def list_experiments(self, status: Optional[str] = None) -> list[Experiment]:
         with self._connect() as conn:
             if status:
@@ -442,6 +468,22 @@ class KnowledgeStore:
                 (group,),
             ).fetchall()
             return [Artifact.model_validate_json(r["content"]) for r in rows]
+
+    def list_artifacts(
+        self, artifact_type: Optional["ArtifactType"] = None
+    ) -> list["Artifact"]:
+        """列出全部 Artifact（可按类型过滤），按创建时间升序。"""
+        with self._connect() as conn:
+            if artifact_type is not None:
+                rows = conn.execute(
+                    "SELECT content FROM artifacts WHERE artifact_type = ? ORDER BY created_at",
+                    (artifact_type.value,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT content FROM artifacts ORDER BY created_at"
+                ).fetchall()
+        return [Artifact.model_validate_json(r["content"]) for r in rows]
 
     def latest_artifact_version(self, group: EntityId) -> Optional[Artifact]:
         versions = self.list_artifact_versions(group)
@@ -777,12 +819,17 @@ class KnowledgeStore:
         if snippet:
             snippet = _re.sub(r"<[^>]+>", "", snippet).strip()
         created = (e.get("created_at") or datetime.utcnow().isoformat())
+        # 可核验标识（DOI/arXiv ID/URL/PDF 直链等）存 extra_json，
+        # 手动补录入库时依赖这些字段还原下载线索
+        extra_keys = ("doi", "arxiv_id", "url", "pdf_url", "venue", "year")
+        extra = {k: e[k] for k in extra_keys if e.get(k) not in (None, "")}
+        extra_json = json.dumps(extra, ensure_ascii=False) if extra else ""
         with self._connect() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO evidence_log "
                 "(log_id, subquery, source, paper_id, title, external_id, offset, "
-                " evidence_score, snippet, match_type, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " evidence_score, snippet, match_type, extra_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     e.get("log_id") or f"ev_{_uuid.uuid4().hex[:16]}",
                     subquery,
@@ -794,6 +841,7 @@ class KnowledgeStore:
                     float(e.get("evidence_score") or 0.0),
                     snippet,
                     e.get("match_type") or "",
+                    extra_json,
                     created,
                 ),
             )
@@ -807,6 +855,21 @@ class KnowledgeStore:
         total = len(self.list_research_gaps())
         conflicts = len(self.list_research_conflicts())
         return {"total": total, "conflicts": conflicts}
+
+    @staticmethod
+    def _row_to_evidence(r) -> dict:
+        """evidence_log 行转 dict，extra_json 合并回顶层字段（doi/arxiv_id/url 等）。"""
+        d = dict(r)
+        raw = d.pop("extra_json", "") or ""
+        if raw:
+            try:
+                extra = json.loads(raw)
+                if isinstance(extra, dict):
+                    for k, v in extra.items():
+                        d.setdefault(k, v)
+            except Exception:  # noqa: BLE001
+                pass
+        return d
 
     def list_evidence(
         self,
@@ -826,7 +889,7 @@ class KnowledgeStore:
                     "SELECT * FROM evidence_log ORDER BY created_at DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
-            return [dict(r) for r in rows]
+            return [self._row_to_evidence(r) for r in rows]
 
     def list_unlinked_evidence(self, limit: int = 200) -> list[dict]:
         """列出未关联论文的证据链条目（检索命中但被筛选/去重剔除的候选）。
@@ -840,7 +903,7 @@ class KnowledgeStore:
                 "ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-            return [dict(r) for r in rows]
+            return [self._row_to_evidence(r) for r in rows]
 
     def link_evidence_to_paper(
         self, log_id: str, paper_id: str, match_type: str = "manual import"

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import pytest
+import sqlite3
 
 from core.knowledge.schema import (
     Artifact,
@@ -391,3 +392,22 @@ def test_new_id_returns_hex_string():
     assert len(new_id) == 32
     # 应是合法的十六进制
     int(new_id, 16)
+
+
+def test_read_only_store_rejects_writes_without_touching_database(knowledge_store):
+    knowledge_store.save_paper(Paper(paper_id="readonly-fixture", title="Read fixture"))
+    db = knowledge_store._db_path
+    before = db.read_bytes()
+    reader = KnowledgeStore(db, read_only=True)
+    assert reader.get_paper("readonly-fixture").title == "Read fixture"
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        reader.save_paper(Paper(paper_id="blocked", title="Not saved"))
+    assert db.read_bytes() == before
+
+
+def test_read_only_store_does_not_create_missing_directory_or_database(tmp_path):
+    root = tmp_path / "not-created"
+    reader = KnowledgeStore(root / "missing.db", read_only=True)
+    with pytest.raises(sqlite3.OperationalError):
+        reader.list_papers()
+    assert not root.exists()

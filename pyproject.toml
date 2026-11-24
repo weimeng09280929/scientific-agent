@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scientific-research-agent-sys"
 version = "0.1.0"
-description = "科研论文 Agent 系统：覆盖调研、思路探讨、方案制定、实验运行、论文写作全生命周期"
+description = "科研方案工作台：通过多会话对话、文献依据与明确采纳，形成可审阅和导出的理工科研究方案"
 requires-python = ">=3.10"
 readme = "README.md"
 license = {text = "MIT"}

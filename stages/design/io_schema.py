@@ -1,15 +1,14 @@
 """design 阶段节点 IO schema 定义。
 
 方案制定阶段（借鉴 AI-Researcher 原子概念分解）：
-    原子概念分解（建立公式↔代码双向映射）
-    → 方法形式化（公式 + 伪代码）
+    原子概念分解（按研究方法适配）
+    → 方法形式化（适用时提供公式或伪代码）
     → 用户审核
     → Claim 抽取与证据关联
     → 方法 Artifact 产出
 
 核心思想（AI-Researcher）：把方法拆为最小可独立验证的原子概念，
-每个概念建立「数学公式 ↔ 代码实现」双向映射，确保论文中的公式与
-实验代码一一对应，避免「论文写一套、代码做一套」。
+仅有计算实现的组成才需要公式与代码映射，其他类型保留论证和验证设计。
 """
 from __future__ import annotations
 
@@ -24,7 +23,7 @@ class AtomDecomposeInput(NodeInput):
     """原子概念分解输入。
 
     借鉴 AI-Researcher：从 ideation 阶段传入的 validated idea 出发，
-    把方法拆为原子概念，每个概念建立「数学公式 ↔ 代码实现」双向映射。
+    把方法拆为原子概念，公式与代码仅在适用时提供。
     """
 
     idea_ids: list[str]
@@ -52,8 +51,8 @@ class AtomDecomposeOutput(NodeOutput):
 
     设计要点：
     - 原子概念应互相正交，每个可独立验证
-    - 公式与代码必须一一对应（status=mapped），冲突时标记 mismatched
-    - dependencies 形成 DAG，便于后续实验阶段按依赖顺序实现
+    - 公式与代码映射仅在适用时记录，不能给没有代码的理论组成补造映射
+    - dependencies 记录论证或方法组成的依赖，不表示已经执行实验
     """
 
     atom_concepts: list[dict[str, Any]]
@@ -65,7 +64,7 @@ class AtomDecomposeOutput(NodeOutput):
 class MethodFormalizeInput(NodeInput):
     """方法形式化输入。
 
-    基于原子概念与公式↔代码映射，整合为完整方法文档（公式 + 伪代码）。
+    基于方法组成与可选的公式/代码映射整理方法文档，不强制算法模板。
     """
 
     idea_ids: list[str]

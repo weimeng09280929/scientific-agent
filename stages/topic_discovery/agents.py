@@ -13,15 +13,20 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
 
 from core.llm import LLMRegistry
+from core.knowledge.innovation_playbook import INNOVATION_PATTERNS_PROMPT
+from core.tools.arxiv_search import search_arxiv
+from core.tools.semantic_scholar import search_semantic_scholar
 from core.tools.direction_evidence import (
     fallback_directions,
     federated_directions,
     fetch_direction_evidence,
+    fetch_zh_evidence,
     is_federated_learning,
     is_large_model_security,
     large_model_security_directions,
@@ -77,6 +82,10 @@ class TopicRecommendationItem(BaseModel):
     topic: str = Field(description="推荐的研究主题名称（简洁明确）")
     rationale: str = Field(description="为什么值得研究（引用趋势数据与领域分析）")
     innovation_point: str = Field(description="创新切入点（具体可操作的研究方向）")
+    innovation_pattern: str = Field(
+        default="",
+        description="创新套路标签：application / modification / fusion / comparison / theory",
+    )
     # 注：原字段名 recommended_materials 已更名为 recommended_objects——
     # 该字段名会经 structured_output 注入 LLM 的 system prompt（"需要填充的字段：..."），
     # 字段名里的 "materials" 本身就是强烈的学科锚点，会把推荐主题带向材料学。
@@ -209,33 +218,61 @@ class TrendFetchAgent(AgentNode):
                 if registry is not None else input_obj.interest
             )
             domain = ctx.get(PROJECT_DOMAIN) or ""
-            if is_federated_learning(input_obj.interest, domain):
-                directions = federated_directions(input_obj.interest, domain)
-                evidence = fetch_direction_evidence(directions)
-                trend_data = {
-                    "query": search_query, "direction_evidence": evidence,
-                    "sample_papers": [p for d in evidence for p in d["papers"]][:20],
-                    "keyword_frequencies": {}, "total_papers_by_year": {},
-                    "total_fetched": sum(d["sample_count"] for d in evidence),
-                    "evidence_status": "retrieved" if evidence else "unavailable",
-                }
-
+            # ===== 统一主路径（任意领域）：先「热门扫描」再规划——
+            # 1) 把用户兴趣翻译成规范英文短语（如 成员推理 → membership inference attack）；
+            # 2) 按该短语扫 S2 高被引经典 + arXiv 近两年新作，还原研究者在
+            #    谷歌学术搜索时看到的真实热门图景；
+            # 3) 规划器参考热门图景，按核心话题的侧面（攻击/防御/评测/组合/综述）
+            #    出方向，检索式锚定核心短语，不偏题、不过度细分。
+            hot = self._hot_scan(
+                search_query,
+                zh_query=input_obj.interest if self._has_cjk(input_obj.interest) else "",
+            ) if registry else {}
+            directions = (
+                self._plan_directions(registry, input_obj.interest, domain, search_query, hot=hot)
+                if registry else []
+            )
+            if directions:
+                # 领域方向表仅作广度补充（最多 3 条），保证领域特有问题不缺位
+                if is_federated_learning(input_obj.interest, domain):
+                    supplement = federated_directions(input_obj.interest, domain)
+                elif is_large_model_security(input_obj.interest, domain):
+                    supplement = large_model_security_directions(input_obj.interest, domain)
+                else:
+                    supplement = []
+                base_ids = {d["id"] for d in directions}
+                directions = directions + [
+                    d for d in supplement if d["id"] not in base_ids
+                ][:3]
+                directions = directions[:6]
             else:
-                if is_large_model_security(input_obj.interest, domain):
+                # 规划器不可用/未产出时才落领域方向表与关键词兜底
+                if is_federated_learning(input_obj.interest, domain):
+                    directions = federated_directions(input_obj.interest, domain)
+                elif is_large_model_security(input_obj.interest, domain):
                     directions = large_model_security_directions(input_obj.interest, domain)
                 else:
-                    directions = self._plan_directions(registry, input_obj.interest, domain, search_query) if registry else []
-                    if not directions:
-                        logger.warning("模型未生成有效检索计划，使用关键词检索兜底")
-                        directions = fallback_directions(input_obj.interest, domain, search_query)
-                evidence = fetch_direction_evidence(directions) if directions else []
-                trend_data = {
-                    "query": search_query, "direction_evidence": evidence,
-                    "sample_papers": [p for d in evidence for p in d["papers"]][:20],
-                    "keyword_frequencies": {}, "total_papers_by_year": {},
-                    "total_fetched": sum(d["sample_count"] for d in evidence),
-                    "evidence_status": "retrieved" if evidence else "unavailable",
-                }
+                    logger.warning("模型未生成有效检索计划，使用关键词检索兜底")
+                    directions = fallback_directions(input_obj.interest, domain, search_query)
+
+            evidence = fetch_direction_evidence(directions) if directions else []
+            # 中文文献补充：用中文原词检索 OpenAlex/S2 的中文期刊论文，
+            # 作为独立证据条目并入，推荐时可引用中英文两路证据
+            if self._has_cjk(input_obj.interest):
+                try:
+                    zh_ev = fetch_zh_evidence(input_obj.interest)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("中文文献证据获取失败: %s", e)
+                    zh_ev = None
+                if zh_ev:
+                    evidence.append(zh_ev)
+            trend_data = {
+                "query": search_query, "direction_evidence": evidence,
+                "sample_papers": [p for d in evidence for p in d["papers"]][:20],
+                "keyword_frequencies": {}, "total_papers_by_year": {},
+                "total_fetched": sum(d["sample_count"] for d in evidence),
+                "evidence_status": "retrieved" if evidence else "unavailable",
+            }
 
             if not evidence:
                 return NodeResult(
@@ -260,22 +297,105 @@ class TrendFetchAgent(AgentNode):
             ),
         )
 
-    def _plan_directions(self, registry: LLMRegistry, interest: str, domain: str, english_query: str) -> list[dict]:
-        """研究对象与领域共同决定检索问题；无可靠检索计划时不制造方向。"""
+    def _hot_scan(self, english_query: str, zh_query: str = "") -> dict:
+        """热门扫描：还原研究者在学术搜索里看到的图景（中英文结合）。
+
+        - classics：S2 按被引数排序的高被引论文（综述/开山作，如 Shokri 2017）；
+          兴趣为中文时，另用中文原词扫 S2 的中文期刊论文
+        - recent：arXiv 近两年的新作（当前社区正在做什么）
+
+        失败返回空 dict，不阻塞主流程。
+        """
+        query = (english_query or "").strip()
+        if not query or self._has_cjk(query):
+            return {}
+        classics: list[dict] = []
+        recent: list[dict] = []
+        try:
+            s2 = search_semantic_scholar(query=query, max_results=20)
+            s2.sort(key=lambda p: p.citation_count or 0, reverse=True)
+            classics = [
+                {"title": p.title, "year": p.year,
+                 "citation_count": p.citation_count, "venue": p.venue}
+                for p in s2[:8] if p.title
+            ]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("热门扫描 S2 失败（query=%r）: %s", query, e)
+        # 中文原词补充扫描：S2/OpenAlex 索引了中文期刊论文，可反映中文社区热点
+        zh = (zh_query or "").strip()
+        if self._has_cjk(zh):
+            try:
+                s2_zh = search_semantic_scholar(query=zh, max_results=10)
+                s2_zh.sort(key=lambda p: p.citation_count or 0, reverse=True)
+                classics.extend(
+                    {"title": p.title, "year": p.year,
+                     "citation_count": p.citation_count, "venue": p.venue,
+                     "language": "zh"}
+                    for p in s2_zh[:4] if p.title
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("热门扫描 S2 中文失败（query=%r）: %s", zh, e)
+        try:
+            current_year = datetime.now().year
+            arx = search_arxiv(
+                query=query, max_results=20,
+                year_from=current_year - 2,
+            )
+            recent = [
+                {"title": p.title, "year": p.year}
+                for p in arx[:8] if p.title
+            ]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("热门扫描 arXiv 失败（query=%r）: %s", query, e)
+        if not classics and not recent:
+            return {}
+        return {"query": query, "classics": classics, "recent": recent}
+
+    def _plan_directions(
+        self,
+        registry: LLMRegistry,
+        interest: str,
+        domain: str,
+        english_query: str,
+        hot: Optional[dict] = None,
+    ) -> list[dict]:
+        """研究方向规划：参考热门图景，按核心话题的侧面出方向。
+
+        粒度对齐研究者的真实搜索习惯（如「成员推理」→ 攻击/防御/评测/组合/综述），
+        方向检索式锚定核心话题短语，不偏题、不过度细分。
+        """
         from core.knowledge.domain_profile import build_core_topics_hint, build_topic_recommend_hint
+
+        hot = hot or {}
+        hot_lines = []
+        for p in hot.get("classics", [])[:5]:
+            cites = p.get("citation_count") or 0
+            hot_lines.append(f"- 经典（被引 {cites}）：{p.get('title','')} ({p.get('year') or ''})")
+        for p in hot.get("recent", [])[:5]:
+            hot_lines.append(f"- 近期：{p.get('title','')} ({p.get('year') or ''})")
+        hot_block = ("\n\n该主题下的热门论文图景：\n" + "\n".join(hot_lines)) if hot_lines else ""
 
         try:
             plan = registry.structured_output(
                 task_type=self.task_type,
                 output_schema=DirectionSearchPlan,
                 system=(
-                    "你是学术检索规划专家。围绕用户的具体兴趣，在给定领域中规划 3-5 个不同的研究问题。"
-                    "同时覆盖已有论文常见的成熟方向与值得检验的新交叉问题；"
-                    "不得复用跨领域通用词如智能筛选、多尺度建模、机制解析。"
+                    "你是学术检索规划专家。核心主题已确定为英文检索短语（见用户消息），"
+                    "请像领域研究者在谷歌学术搜索这个主题一样，规划 3-5 个研究问题方向。"
+                    "要求："
+                    "1）每个方向是核心主题的一个侧面（如：攻击方法、防御与缓解、评测基准、"
+                    "与其他技术结合的交叉场景、综述与实证分析），"
+                    "核心主题短语必须完整保留在每个方向的 query 中，只通过附加侧面词区分；"
+                    "2）方向不得偏移到其他主题——核心主题是成员推理，所有方向仍须围绕成员推理；"
+                    "3）可参考热门论文图景判断社区当前关注哪些侧面，热门度不得编造；"
+                    "4）方向之间差异显著，不复用跨领域通用词（智能筛选、可复现实证等）。"
                     "英文 query 必须是具体学术术语，不得凭空声称其热门或创新已获证实。"
                 ),
-                prompt=f"领域：{domain}\n研究兴趣：{interest}\n英文核心检索词：{english_query}\n"
-                       f"领域核心：{build_core_topics_hint(domain)}\n研究对象：{build_topic_recommend_hint(domain)}",
+                prompt=(
+                    f"领域：{domain}\n研究兴趣：{interest}\n核心主题（英文检索短语）：{english_query}\n"
+                    f"领域核心：{build_core_topics_hint(domain)}\n研究对象：{build_topic_recommend_hint(domain)}"
+                    f"{hot_block}"
+                ),
                 temperature_override=0.3,
             )
         except Exception as exc:
@@ -401,8 +521,12 @@ class TopicRecommendAgent(AgentNode):
         if not dry_run and registry is not None and input_obj.trend_data.get("direction_evidence"):
             try:
                 recommendations = self._evidence_recommend(input_obj, registry, domain)
+                if not recommendations:
+                    # 模型可能省略/写错 evidence_id，或课题超出论文范围。
+                    # 保留真实检索证据，退回证据限定候选，不把有论文误报为零检索。
+                    recommendations = self._evidence_fallback(input_obj, domain)
             except Exception as e:
-                logger.warning("方向证据推荐失败: %s", e)
+                logger.warning("方向证据推荐失败: %s", e, exc_info=True)
                 recommendations = self._evidence_fallback(input_obj, domain)
         elif not dry_run:
             recommendations = []
@@ -455,7 +579,8 @@ class TopicRecommendAgent(AgentNode):
         seen = set()
         used_directions = set()
         security_fl = is_federated_learning(input_obj.interest, domain) and any(
-            d["id"] in {"fl_poisoning", "fl_privacy_leak", "fl_byzantine", "fl_secure_aggregation", "fl_adversarial"}
+            d["id"] in {"fl_membership_inference", "fl_poisoning", "fl_privacy_leak",
+                        "fl_byzantine", "fl_secure_aggregation", "fl_adversarial"}
             for d in evidence
         )
         for item in result.recommendations:
@@ -560,6 +685,7 @@ class TopicRecommendAgent(AgentNode):
             ),
         }
         recommendations: list[dict] = []
+        seen_topics: set[str] = set()
         for index, direction in enumerate(evidence[:5]):
             papers = direction.get("papers", [])[:3]
             if not papers:
@@ -567,6 +693,46 @@ class TopicRecommendAgent(AgentNode):
             topic, innovation, objects = concrete.get(direction.get("id"), (None, None, None))
             if not topic:
                 topic, innovation, objects = self._generic_evidence_topic(direction)
+            if is_federated_learning(input_obj.interest, domain) and "大模型" not in input_obj.interest:
+                # 通用安全档案中的 poisoning/privacy 不等于大模型安全。
+                # 保留规划阶段的具体问题，不能用大模型模板替换联邦学习课题。
+                name = str(direction.get("name") or "").strip()
+                topic = name if "联邦" in name else f"联邦学习中的{name}"
+                text = f"{name} {direction.get('query', '')}".lower()
+                if any(term in text for term in ("membership", "成员推", "成员推断")):
+                    question = "明确攻击者可见信息，在相同训练预算下比较成员推断效果、模型效用和不同客户端条件，核对已有隐私风险结论的适用范围"
+                elif any(term in text for term in ("gradient inversion", "梯度反演")):
+                    question = "固定攻击者观察范围与重建预算，改变批量大小和通信信息，比较重建误差与防御代价"
+                elif any(term in text for term in ("non-iid", "非独立", "部分参与")):
+                    question = "固定攻击比例与训练预算，分别改变数据异质性和客户端参与率，区分两者造成的性能变化"
+                elif any(term in text for term in ("convergence", "收敛", "权衡")):
+                    question = "记录不同聚合器的逐轮损失、最终准确率与收敛速度，检查鲁棒性改善是否伴随效用或收敛代价"
+                elif any(term in text for term in ("指标", "基准", "benchmark", "metric")):
+                    question = "在相同种子、数据划分和预算下报告准确率下降与种子间波动，检查指标选择是否改变防御方法排序"
+                elif any(term in text for term in ("median", "krum", "中位数", "截断")):
+                    question = "对均值、坐标中位数及所选稳健聚合器保持公平训练预算，改变恶意客户端比例以定位各自失效条件"
+                else:
+                    question = "明确标签翻转攻击者的客户端控制范围，分别改变恶意客户端比例与投毒轮次，检验防御在不同威胁强度下的表现"
+                innovation = f"针对“{name}”的待检验切入点：{question}。需先与所列最接近工作核对，不能据检索样本宣称无人研究。"
+                objects = [name, "联邦学习客户端", "可复现对照实验"]
+            # 主题唯一性守卫：不同细分方向可能命中同一语义档案（例如多个隐私
+            # 相关方向都落到同一句 privacy 模板），冲突时退回规划阶段生成的
+            # 方向名——每个方向名天然不同，保证推荐不会出现一模一样的主题。
+            if topic in seen_topics:
+                name = str(direction.get("name") or "").strip()
+                if name and name not in seen_topics:
+                    topic = name
+                    innovation = (
+                        f"围绕“{name}”复用所列论文的公开任务和指标设置对照实验，"
+                        "通过消融实验定位有效条件与失效边界。"
+                    )
+                    objects = [name, "论文公开任务", "关键评价指标"]
+                else:
+                    suffix = 2
+                    while f"{topic}（方案{suffix}）" in seen_topics:
+                        suffix += 1
+                    topic = f"{topic}（方案{suffix}）"
+            seen_topics.add(topic)
             lead_paper = next((p for p in papers if p.get("title")), papers[0])
             rec = {
                 "topic": topic,
@@ -771,6 +937,21 @@ class TopicRecommendAgent(AgentNode):
         )
 
         # ===== 第二步：基于热门方向逐条产出完整推荐 =====
+        # 防御性去重：step1 偶发返回重复关键词会导致后续推荐全部锚到同一条
+        seen_kw: set[str] = set()
+        unique_hot = []
+        for d in hot.directions:
+            k = (d.keyword or "").strip()
+            if not k or k.lower() in seen_kw:
+                continue
+            seen_kw.add(k.lower())
+            unique_hot.append(d)
+        if len(unique_hot) < len(hot.directions):
+            logger.warning(
+                "热门方向去重：%d -> %d（LLM 返回了重复关键词）",
+                len(hot.directions), len(unique_hot),
+            )
+            hot.directions = unique_hot
         hot_block = "\n".join(
             f"  - {d.keyword}（popularity={d.popularity_score}，{d.trend_summary}）"
             for d in hot.directions
@@ -808,16 +989,22 @@ class TopicRecommendAgent(AgentNode):
             "   数据驱动（主动学习/生成模型/符号回归）；\n"
             "4. 若两个主题落在同一研究对象上，必须用不同的科学问题或手段加以区分，\n"
             "   宁可刀状细分也不要选题近似；\n"
-            "5. 主题名控制在 15-30 字，信息密度高，去掉“基于”“关于”等冗余介词。\n\n"
+            "5. 主题名控制在 15-30 字，信息密度高，去掉“基于”“关于”等冗余介词；\n"
+            "6. 【唯一性硬约束】输出前自查：所有 topic 字符串必须互不相同——\n"
+            "   出现两条一模一样（或仅一词之差的近似重复）主题即为不合格，\n"
+            "   每条 topic 必须体现该条推荐独有的研究对象/手段差异；\n"
+            "   innovation_point 同理，禁止多条推荐共用同一句切入点。\n\n"
             "【其余字段要求】\n"
             "1. rationale 引用趋势数据（增长率、论文数等），并说明该主题**为什么是一个值得做的空缺**；\n"
-            "2. innovation_point 给出具体可操作的切入点（具体对象/具体方法/具体指标）；\n"
+            "2. innovation_point 给出具体可操作的切入点（具体对象/具体方法/具体指标），\n"
+            "   且必须按下方「创新点套路锚定」归类并填写 innovation_pattern 字段；\n"
             f"3. recommended_objects 字段填推荐的具体研究对象（{_topic_hint}），尽量各不相同；\n"
             "4. 评估实现难度 difficulty（easy/medium/hard）、创新度 novelty（low/medium/high）、\n"
             "   与用户研究兴趣的关联度 relevance（low/medium/high）；\n"
             "5. popularity_score 与上一步热门度保持一致（0-100）；\n"
             "6. growth_rate 填该方向对应关键词的年度增长率（浮点，如 0.35）。\n"
             "避免推荐饱和方向（增长率<10%）。\n\n"
+            f"{INNOVATION_PATTERNS_PROMPT}\n\n"
             f"{_name_patterns}"
         )
         step2_prompt = (
@@ -836,6 +1023,58 @@ class TopicRecommendAgent(AgentNode):
         )
 
         recs = [item.model_dump() for item in result.recommendations]
+
+        # ===== 主题唯一性守卫：LLM 偶发把多条推荐写成同一主题名 =====
+        # 现象：rationale 各不相同（方向其实不同），但 topic/innovation_point 被复制。
+        # 处理：按 topic 去重 → 对缺失的槽位做一次补生成调用（附带禁用主题清单）。
+        def _topic_key(r: dict) -> str:
+            return (r.get("topic") or "").strip().lower()
+
+        unique_recs: list[dict] = []
+        seen_topics: set[str] = set()
+        for r in recs:
+            k = _topic_key(r)
+            if not k or k in seen_topics:
+                continue
+            seen_topics.add(k)
+            unique_recs.append(r)
+        dup_count = len(recs) - len(unique_recs)
+        if dup_count > 0:
+            logger.warning(
+                "推荐主题去重：%d -> %d（LLM 返回了 %d 条重复主题），触发补生成",
+                len(recs), len(unique_recs), dup_count,
+            )
+            forbidden = "\n".join(f"- {r.get('topic', '')}" for r in unique_recs)
+            need = len(recs) - len(unique_recs)
+            repair_system = (
+                step2_system
+                + "\n\n【补生成约束（最高优先级，覆盖前文任何数量要求）】\n"
+                "以下主题已被占用，禁止再输出它们或其近似改写：\n"
+                f"{forbidden}\n"
+                f"只输出 {need} 条全新的推荐，主题名互不相同且与上方已占用主题都不同，"
+                "各自来自不同的热门方向；其余字段要求不变。"
+            )
+            try:
+                repair = registry.structured_output(
+                    task_type=self.task_type,
+                    output_schema=TopicRecommendationSchema,
+                    system=repair_system,
+                    prompt=step2_prompt,
+                    temperature_override=0.9,
+                )
+                for item in repair.recommendations:
+                    d = item.model_dump()
+                    k = _topic_key(d)
+                    if not k or k in seen_topics:
+                        continue
+                    seen_topics.add(k)
+                    unique_recs.append(d)
+                    if len(unique_recs) >= len(recs):
+                        break
+            except Exception as e:
+                logger.warning("重复主题补生成失败（保留去重后的推荐）: %s", e)
+        recs = unique_recs
+
         # 服务端按热门度降序排序（保证 ctx 顺序 = 展示顺序 = 前端选中索引一致）
         recs.sort(key=lambda r: r.get("popularity_score", 0), reverse=True)
         return recs

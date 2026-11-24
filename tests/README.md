@@ -1,78 +1,40 @@
-# 自动化验证脚本（本地使用，不上传 git）
+# 测试说明
 
-## 目的
-持续验证产品质量，覆盖 **赛题三·方向三（材料方向）评分项**，帮助本地快速发现回归问题。
+测试主要使用临时项目、SQLite 和离线模型／来源夹具，不用真实用户项目验证写入。
 
-## 脚本清单
+## 快速回归
 
-| 脚本 | 验证维度 | 耗时 |
-|------|---------|------|
-| `validate_arch.py` | 语法/导入/schema/子图/ContextKey | ~1.5s |
-| `validate_pipeline.py` | 5 阶段 + discovery 端到端 + resume/blocked | ~10s |
-| `validate_outputs.py` | Claim/mechanism/证据链/新颖性/报告 | ~7s |
-| `validate_competition.py` | 赛题三·方向三评分项覆盖度（50% + 50%） | ~40s |
-| `validate_api.py` | 路由/下载类型/多格式/前端调用 | ~2s |
-| `run_all.py` | 总入口 + JSON 综合报告 | 全部运行 |
-
-## 使用方法
+在安装项目依赖的虚拟环境中补充：
 
 ```bash
-# 全部验证
-python tests/run_all.py
-
-# 快速验证（仅架构 + API）
-python tests/run_all.py --quick
-
-# 单项验证
-python tests/run_all.py --only validate_outputs
-
-# 无颜色输出（适合日志捕获）
-python tests/run_all.py --no-color
-
-# 直接运行单项
-python tests/validate_arch.py
-python tests/validate_pipeline.py
-python tests/validate_outputs.py
-python tests/validate_competition.py
-python tests/validate_api.py
+python -m pip install pytest pytest-asyncio httpx
+python -m pytest tests/test_product_plan_boundary.py tests/test_project_conversations.py tests/test_library_audit_refresh.py -q
 ```
 
-## 输出
+## 按能力选择
 
-- **终端**：彩色分级报告（S/A/B/C/D）+ 各维度详细输出
-- **JSON 报告**：`tests/last_full_report.json`（综合）+ `tests/last_quality_report.json`（产出质量）
+| 能力 | 用例 |
+| --- | --- |
+| DESIGN 上限与旧入口保护 | test_product_plan_boundary.py |
+| 多会话、幂等与材料依据 | test_project_conversations.py、test_second_batch_workspace.py |
+| 检索来源、报告范围与调用审计 | test_research_tasks.py、test_real_workflow_reliability.py |
+| 三类方案与修订 | test_research_plan_templates.py |
+| 离线教学与进度 | test_research_teaching_cases.py、test_teaching_experience.py |
+| 文献计数与检索审计展示 | test_navigation_counts.py、test_library_audit_refresh.py |
 
-## 评级
+完整测试集还包含保留的内部历史架构测试。内部完整流水线不是网页产品开放能力，不能根据测试名称认为产品会运行实验或生成论文。
 
-| 等级 | 通过率 | 含义 |
-|------|--------|------|
-| **S** | ≥90% | 冠军候选 |
-| **A** | ≥80% | 强竞争力 |
-| **B** | ≥70% | 良好 |
-| **C** | ≥60% | 合格 |
-| **D** | <60%  | 需改进 |
+## 主应用浏览器检查
 
-## 设计原则
+浏览器脚本需要另装 Node.js、Playwright 与兼容浏览器。以文献审计专项为例：
 
-1. **不修改源代码**（只读 + dry_run）
-2. **失败快速暴露**（清晰的错误信息 + traceback）
-3. **可重入**（可重复运行，KV 数据会更新）
-4. **不影响生产**（使用 PID 作为 project_id，不污染真实项目）
-
-## 添加新检查项
-
-每个脚本是一个独立模块，按模式：
-
-```python
-def check_xxx(project_id: str, topic: str = "") -> dict[str, Any]:
-    """检查项说明。"""
-    print(_section("X. 检查项名"))
-    # ... 检查逻辑
-    return {"score": 0~100, ...}
+```bash
+npm install --no-save playwright
+python tests/real_workflow_test_server.py --port 8069
 ```
 
-在 `main()` 的 `checks` 列表中添加。
+另开终端执行 `node tests/library_audit_browser.cjs`。该隔离服务使用临时数据，替换的仅为外部模型和来源传输边界；脚本操作真实 FastAPI 接口及主应用。其默认浏览器为本机 Edge；没有 Edge 的环境需调整测试的 browser channel，或安装对应浏览器后运行。
 
-## 与 DEVLOG 联动
+结束后关闭隔离实例；不要让脚本指向真实用户项目。其他脚本的端口与输出目录见各自环境变量及文件头。
 
-每次重大功能调整后，运行 `python tests/run_all.py` 并记录综合评级到 [DEVLOG.md](../DEVLOG.md)，便于追踪产品质量演进。
+离线测试与浏览器检查不代表真实模型回答质量、科学正确性或公网发布验收。未经授权不要运行带 live 名称的脚本或真实服务调用。

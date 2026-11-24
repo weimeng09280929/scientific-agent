@@ -3,9 +3,9 @@
 # 每个任务类型（task_type）声明使用哪个 provider + model。
 # stages 中各 Agent 调用 LLM 时，按 task_type 路由，避免硬编码模型。
 #
-# ===== 当前配置策略（SiliconFlow Xing4.0-29B）=====
-# 全部 task 路由到 siliconflow provider，使用硅基流动 OpenAI 兼容接口，
-# API 请求 model=XingChenAGI/Xing4.0-29B。旧 provider 凭据保留在本地 .env，供后续回退。
+# ===== 当前配置策略（DeepSeek V4.1 Flash 1017）=====
+# 现有生成任务使用 deepseek provider，经本地 DEEPSEEK_BASE_URL 指向的网关调用。
+# TokenDance /models 已核对模型编号 deepseek-v4.1-flash-1017；不改变密钥或产品 DESIGN 上限。
 #
 # ===== 原推荐多 provider 组合（注释保留，便于后续切换）=====
 #   - 调研/思路/方案/审查：minimax glm-5.3-flash（主力，经 TokenDance 网关）
@@ -41,48 +41,49 @@ tasks:
   # 子问题分解：借鉴 GPT-Researcher，把研究主题拆为子问题
   research_subquery_decompose:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "借鉴 GPT-Researcher，把研究主题分解为 5-10 个子问题用于并行检索"
 
   literature_search:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "根据主题生成检索关键词与查询策略"
 
   # 工具化 RAG：借鉴 PaperQA，把 RAG 拆为 agent 可调用的工具
   paper_relevance_filter:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.0
     description: "借鉴 PaperQA，对候选论文做相关性打分与筛选（工具化 RAG 的 filter 环节）"
 
   paper_metadata_extract:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.0
     description: "从论文 PDF/HTML 抽取结构化元数据（标题、作者、年份、摘要、引用）"
 
   paper_chunk_summarize:
     # 原推荐 mimo MiMo-V2-Pro（1M 上下文），用户只开 minimax 故用 M3（同样 1M 上下文）
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "对论文 chunk 生成摘要用于检索增强"
 
   # 领域知识抽取：从论文抽取「研究对象-评价指标-方法条件」三元组
   # （领域自适应：三元组语义由 core/knowledge/domain_profile.py 按研究领域解析）
   material_knowledge_extract:
+    max_tokens: 4096
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.0
     description: "从论文全文抽取领域知识三元组（研究对象结构/属性标识 + 评价指标 + 方法条件），结构化入库"
 
   # 交叉验证：借鉴 GPT-Researcher，多源信息冲突时做交叉验证
   research_cross_validate:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.1
     description: "借鉴 GPT-Researcher，对多源信息冲突做交叉验证，给出可信度评分"
     max_tokens: 8192
@@ -90,21 +91,22 @@ tasks:
   # 研究缺口识别（Task 3）：双通道（LLM 语义 + 数据驱动断链检测）输出结构化 Gap 清单
   research_gap_identify:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "识别研究缺口：矛盾结论/未被探索方向/缺失知识连接，输出带证据链的结构化 Gap 清单"
     max_tokens: 8192
 
   # ===== 思路探讨阶段 =====
   ideation_brainstorm:
+    max_tokens: 8192
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.7
     description: "与用户交互式探讨，生成候选思路"
 
   ideation_validate:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.3
     description: "对思路做可行性、新颖性、贡献度验证"
 
@@ -112,27 +114,29 @@ tasks:
   # 原推荐 local，用户未部署本地模型时回退到 minimax（注意：思路会经过云端）
   ideation_private_reasoning:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.5
     description: "思路内部推演（原推荐 local，未部署本地模型时回退 minimax）"
 
   # ===== 方案制定阶段 =====
   # 原子概念分解：借鉴 AI-Researcher，把方法拆为原子概念并建立公式↔代码映射
   design_atom_decompose:
+    max_tokens: 8192
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "借鉴 AI-Researcher，把方法分解为原子概念，建立数学公式↔代码实现双向映射"
 
   design_method_formalize:
+    max_tokens: 8192
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
-    description: "将方法形式化为公式与算法伪代码"
+    description: "理工科研究方案：按计算、理论或实验设计适配；公式和代码仅在必要时提供"
 
   design_claim_extract:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.0
     description: "从方法中抽取 Claim 并关联证据"
 
@@ -141,34 +145,35 @@ tasks:
   experiment_code_generate:
     # 原推荐 deepseek deepseek-v4-pro（编程最强），用户只开 minimax 故用 M3
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "借鉴 AI-Researcher Code Agent，根据方法生成实验代码"
     max_tokens: 8192
 
   experiment_code_review:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.1
     description: "借鉴 AI-Researcher Advisor Agent，审查实验代码并给出修改建议"
     max_tokens: 8192
 
   experiment_config_generate:
+    max_tokens: 8192
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "根据方法生成实验配置（数据集、baseline、超参）"
 
   experiment_anomaly_analyze:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "分析实验异常（loss spike、NaN、不收敛）并给出处置建议"
 
   # 实验成败评估：判断 Claim 是否被实验验证，决定是否进入 writing
   experiment_outcome_assess:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.1
     description: "评估实验结果是否验证了核心 Claim，决定是否进入论文写作阶段"
 
@@ -176,7 +181,7 @@ tasks:
   # 层级式生成：借鉴 AI-Researcher，大纲→填充→校对三阶段
   writing_outline:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.3
     description: "借鉴 AI-Researcher，先确定论文整体大纲与章节结构"
     max_tokens: 8192
@@ -184,28 +189,28 @@ tasks:
   writing_section_draft:
     # 原推荐 mimo MiMo-V2-Pro（1M 上下文），用户只开 minimax 故用 M3（同样 1M 上下文）
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.4
     description: "按章节逐步撰写（M3 1M 上下文，可装载全部 Claim/Experiment 素材）"
     max_tokens: 8192
 
   writing_review:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "以审稿人视角给出修改意见"
     max_tokens: 8192
 
   writing_style_learn:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.0
     description: "从目标会议论文中学习写作风格特征"
 
   # 旧 task 保留兼容（writing_draft 等价于 writing_outline + writing_section_draft）
   writing_draft:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.4
     description: "根据 Claim 与实验结果起草论文章节（兼容旧节点）"
     max_tokens: 8192
@@ -214,7 +219,7 @@ tasks:
   # LLM 从 Research Gap 生成候选关系假设作为搜索种子
   discovery_hypothesis_seed:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.5
     description: "从 Research Gap 与文献证据生成候选关系假设（搜索种子）"
     max_tokens: 8192
@@ -222,14 +227,14 @@ tasks:
   # 定义搜索空间：研究变量/目标指标/约束条件，并从文献抽取数据点
   discovery_search_space:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "定义关系搜索空间，从文献抽取 (变量, 指标) 数据点"
 
   # LLM 引导搜索：生成候选配置 + 评估科学合理性 + 引导剪枝（核心创新）
   discovery_llm_guided_search:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.4
     description: "LLM 深度参与搜索过程：生成候选、评估中间结果、引导剪枝"
     max_tokens: 8192
@@ -237,7 +242,7 @@ tasks:
   # 验证发现的关系：交叉验证文献、评估新颖性、关联证据链
   discovery_validate:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "验证候选关系：文献交叉验证 + 新颖性评估 + 证据链关联"
     max_tokens: 8192
@@ -245,24 +250,50 @@ tasks:
   # 生成结构化发现报告（含物理机制解释）
   discovery_report:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.3
     # 完整多章节报告 + M3 思考链开销，2048 默认值会导致正文被截断（用户反馈"物理机制…额外降低 κ_L（除"处戛然而止）
     max_tokens: 16384
     description: "生成关系发现报告，含机制解释与证据链"
 
+# ===== 对话驱动的文献检索任务（第五步：research_tasks pipeline）=====
+# model_fn(kind) 会以 "research_"+kind 作为 task_type 路由：
+#   plan → 查询规划（中文主题转英文检索式）
+#   rank → 候选论文相关性筛选
+#   synthesize → 研究现状整理（严格证据边界）
+  research_plan:
+    provider: deepseek
+    model: deepseek-v4.1-flash-1017
+    temperature: 0.2
+    description: "对话检索任务：把用户主题规划为最多 3 条检索查询"
+
+  research_rank:
+    provider: deepseek
+    model: deepseek-v4.1-flash-1017
+    temperature: 0.0
+    # reasoning 模型思考链 + 20 篇候选 JSON 输出，4096 会触发 LLMTruncatedError
+    max_tokens: 16384
+    description: "对话检索任务：对候选论文做相关性筛选与排序"
+
+  research_synthesize:
+    provider: deepseek
+    model: deepseek-v4.1-flash-1017
+    temperature: 0.2
+    max_tokens: 16384
+    description: "对话检索任务：基于检索结果整理研究现状（仅元信息，不出结论）"
+
 # ===== 方向推荐阶段（topic_discovery：研究趋势发现与主题推荐）=====
 # 趋势分析（纯统计计算，不调用 LLM，但 task_type 声明用于路由兼容）
   topic_trend_analysis:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.2
     description: "关键词趋势分析（增长率计算 + 新兴/稳定/饱和方向分类）"
 
   # LLM 生成推荐研究主题：解读趋势数据 + 按研究领域推荐具体研究对象 + 评估创新性
   topic_recommend:
     provider: deepseek
-    model: deepseek-v4.1-flash
+    model: deepseek-v4.1-flash-1017
     temperature: 0.5
     description: "根据领域趋势分析结果，LLM 生成 3-5 个推荐研究主题（含创新切入点与研究对象推荐，领域自适应）"
 

@@ -280,7 +280,8 @@ class MinerUClient:
 
     # ----- Fallback 模式 -----
 
-    def _parse_fallback(self, pdf_path: Path) -> MinerUDocument:
+    @staticmethod
+    def _parse_fallback(pdf_path: Path) -> MinerUDocument:
         """Fallback：使用 pypdf 简单文本提取。
 
         不进行深度结构化，仅返回全文 + 按页切分 sections。
@@ -297,14 +298,20 @@ class MinerUClient:
                 parse_meta={"error": "pypdf 未安装"},
             )
 
+        if len(reader.pages) > 400:
+            raise ValueError("本地 PDF 文本提取最多支持 400 页")
         sections: list[MinerUSection] = []
         full_parts: list[str] = []
+        extracted_chars = 0
 
         for i, page in enumerate(reader.pages):
             try:
                 text = page.extract_text() or ""
             except Exception:
                 text = ""
+            extracted_chars += len(text)
+            if extracted_chars > 2_000_000:
+                raise ValueError("PDF 提取文本超过本地 200 万字符上限")
             # 按页作为最小 section
             sec = MinerUSection(
                 heading=f"Page {i + 1}",
@@ -328,7 +335,8 @@ class MinerUClient:
             sections=sections,
             mode="fallback",
             full_text="\n".join(full_parts),
-            parse_meta={"source": "pypdf_fallback", "path": str(pdf_path)},
+            parse_meta={"source": "pypdf_fallback", "path": str(pdf_path),
+                        "pages_without_text": sum(not part.strip() for part in full_parts)},
         )
 
     # ----- 工具方法 -----
@@ -429,3 +437,8 @@ def mineru_is_available() -> bool:
 def parse_pdf_with_mineru(pdf_path: str | Path) -> MinerUDocument:
     """模块级：解析 PDF，返回结构化文档（不可用时降级 fallback）。"""
     return _get_default_client().parse_pdf(pdf_path)
+
+
+def parse_pdf_locally(pdf_path: str | Path) -> MinerUDocument:
+    """Text layer only. This entry point never instantiates a remote parser."""
+    return MinerUClient._parse_fallback(Path(pdf_path))

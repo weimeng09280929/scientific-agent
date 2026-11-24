@@ -1,0 +1,64 @@
+/* Actual main app + temporary FastAPI; only SDK/source boundaries are offline. */
+const {chromium}=require('playwright'),assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+const base=process.env.SRA_WORKBENCH_URL||'http://127.0.0.1:8069',before=process.argv.includes('--before'),out=path.resolve('docs/workbench-experience-convergence');
+(async()=>{
+ fs.mkdirSync(out,{recursive:true});const browser=await chromium.launch({channel:'msedge',headless:true}),ctx=await browser.newContext({viewport:{width:1440,height:900},acceptDownloads:true}),page=await ctx.newPage(),errors=[],outside=[];
+ page.on('pageerror',e=>errors.push(e.message));await ctx.route('**/*',r=>new URL(r.request().url()).origin===base?r.continue():(outside.push(r.request().url()),r.abort()));
+ const get=async u=>{const r=await page.request.get(base+u);assert.ok(r.ok(),await r.text());return r.json();},post=async(u,data)=>{const r=await page.request.post(base+u,{data});assert.ok(r.ok(),await r.text());return r.json();};
+ const ready=()=>page.locator('[data-ref="send"]:not(:disabled)').waitFor(),shot=async n=>{assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);await page.screenshot({path:path.join(out,`${before?'before':'after'}-${n}.png`)});};
+ try{
+  const results={},stateBefore=await get('/__reliability__/state');
+  await page.goto(base+'/');await ready();await shot('home-desktop');await page.setViewportSize({width:390,height:844});await shot('home-mobile');await page.setViewportSize({width:1440,height:900});
+  const p=await post('/api/conversations/start',{request_id:'workbench-layout-sample',title:'联邦学习的数据异质性与公平比较：有限计算资源下的方法研究与可行性讨论',conversation_title:'比较非独立同分布设置中的研究问题与方法：讨论范围和证据缺口',domain:'ai',guidance_mode:'direct',entry_stage:'question'});
+  fs.writeFileSync(path.join(out,'fixture.json'),JSON.stringify(p,null,2));
+  await page.goto(`${base}/workspace?project=${p.project_id}&conversation=${p.conversation_id}`);await ready();await page.locator('[data-ref="input"]').fill('保留草稿：先核对资料，再讨论问题。');await shot('conversation-desktop');
+  await page.locator('.ch-title-menu > summary').click();await shot('menu-desktop');await page.keyboard.press('Escape');await page.locator('[data-ref="panelToggle"]').click();await shot('materials-desktop');await page.setViewportSize({width:390,height:844});await shot('materials-mobile');
+  if(before)return;
+  await page.locator('[data-ref="panelClose"]').click();assert.equal(await page.locator('[data-ref="input"]').inputValue(),'保留草稿：先核对资料，再讨论问题。');
+  await page.setViewportSize({width:1440,height:900});
+  // Browsing / menus / settings must not generate anything or change research.
+  const menu=page.locator('.ch-title-menu'),toggle=menu.locator('summary');await toggle.click();await page.locator('[data-ref="input"]').click();assert.equal(await menu.getAttribute('open'),null);
+  await toggle.click();await page.keyboard.press('Escape');assert.equal(await menu.getAttribute('open'),null);assert.equal(await toggle.evaluate(n=>n===document.activeElement),true);
+  await toggle.click();await page.getByRole('button',{name:'项目与对话有什么不同？',exact:true}).click();assert.equal(await menu.getAttribute('open'),null);
+  await page.getByRole('button',{name:'知道了',exact:true}).click();await page.reload();await ready();assert.equal(await page.locator('[data-ref="relationshipHint"]').isVisible(),false);
+  await page.locator('[data-ref="panelToggle"]').click();await page.getByRole('tab',{name:'文献与报告',exact:true}).click();await page.locator('[data-ref="refresh"]').click();assert.equal(await page.locator('[data-ref="researchSummary"]').isVisible(),false);
+  await page.getByRole('tab',{name:'文献与报告',exact:true}).focus();await page.keyboard.press('ArrowRight');assert.equal(await page.getByRole('tab',{name:'研究方案',exact:true}).getAttribute('aria-selected'),'true');await page.locator('[data-ref="panelClose"]').click();
+  const modelAfterBrowse=(await get('/__reliability__/state')).model_calls.length;assert.equal(modelAfterBrowse,stateBefore.model_calls.length);
+  results.menus_material_tabs={passed:true,browsing_model_calls:0};
+  // Real persisted long thread. No business API mocks; offline SDK only.
+  const prefix=`/api/projects/${p.project_id}/conversations/${p.conversation_id}`;
+  for(let i=0;i<18;i++)await post(prefix+'/messages',{request_id:'workbench-history-'+i,content:'讨论第'+i+'个细节：请解释研究范围和证据，不生成方案。'});
+  await page.reload();await ready();await page.locator('[data-ref="input"]').fill('面板关闭后继续编辑，不要丢失。');
+  await page.locator('[data-ref="messages"]').evaluate(n=>n.scrollTop=140);const top=await page.locator('[data-ref="messages"]').evaluate(n=>n.scrollTop);assert(top>0);
+  const text=(await get(prefix+'/messages?limit=1&tail=true')).messages[0].content;await post(prefix+'/messages',{request_id:'workbench-late-new',content:'新增一轮，只讨论资料含义。'});await page.bringToFront();
+  await page.locator('[data-ref="panelToggle"]').click();await page.locator('[data-ref="panelWide"]').click();await page.locator('[data-ref="panelClose"]').click();assert(Math.abs(await page.locator('[data-ref="messages"]').evaluate(n=>n.scrollTop)-top)<3);assert.equal(await page.locator('[data-ref="input"]').inputValue(),'面板关闭后继续编辑，不要丢失。');
+  await page.setViewportSize({width:390,height:844});await page.locator('[data-ref="messages"]').evaluate(n=>n.scrollTop=140);const mobileTop=await page.locator('[data-ref="messages"]').evaluate(n=>n.scrollTop);
+  await page.locator('[data-ref="panelToggle"]').click();assert.equal(await page.locator('.ch-center').evaluate(n=>n.inert),true);await page.keyboard.press('Escape');assert.equal(await page.locator('[data-ref="panel"]').isVisible(),false);assert(Math.abs(await page.locator('[data-ref="messages"]').evaluate(n=>n.scrollTop)-mobileTop)<3);await shot('long-conversation-mobile');
+  await page.reload();await ready();assert.equal(await page.locator('[data-ref="input"]').inputValue(),'面板关闭后继续编辑，不要丢失。');
+  await page.setViewportSize({width:720,height:450});await shot('zoom-200-equivalent');const send=await page.locator('[data-ref="send"]').boundingBox();assert(send.y>=0&&send.y+send.height<=450);
+  await page.setViewportSize({width:1440,height:900});
+  // Existing project click is read-only; same-name project details distinguish identity.
+  const twins=[];for(let i=0;i<12;i++)twins.push(await post('/api/conversations/start',{request_id:'workbench-nav-'+i,title:i<2?'联邦学习比较研究':'导航测试 '+i,conversation_title:'讨论范围',domain:'ai'}));
+  await page.reload();await ready();await page.locator('#ch-project-search').fill('联邦学习比较研究');await page.locator('#ch-projects .ch-project-row').first().waitFor();await page.waitForFunction(()=>document.querySelectorAll('#ch-projects .ch-project-row').length===2);
+  const dis=await page.locator('.ch-project-disambiguator').allTextContents();assert.equal(dis.length,2);assert.notEqual(dis[0],dis[1]);
+  const details=page.locator('#ch-projects .ch-row-menu').first();await details.locator('summary').focus();await page.keyboard.press('Enter');assert.match(await details.innerText(),/项目编号/);await page.keyboard.press('Escape');
+  const countBefore=(await get('/api/projects?limit=5')).total;await page.locator('#ch-projects .ch-project-link').first().click();await ready();assert.equal(new URL(page.url()).searchParams.get('conversation'),null);assert.equal((await get('/api/projects?limit=5')).total,countBefore);
+  await page.locator('#ch-project-search').fill('');await page.waitForFunction(()=>document.querySelectorAll('#ch-projects .ch-project-row').length>=5);await page.locator('#ch-project-expand').click();await page.getByRole('button',{name:'加载更多项目',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('#ch-projects .ch-project-row').length>10);assert(await page.locator('#ch-projects .ch-project-row').count()>10);
+  await page.locator('#ch-project-group').click();assert.equal(await page.locator('#ch-project-body').isVisible(),false);await page.locator('#ch-project-group').click();
+  const searched=page.waitForResponse(r=>{const u=new URL(r.url());return u.pathname==='/api/conversations/recent'&&u.searchParams.get('q')==='讨论范围'&&u.searchParams.get('offset')==='0';});await page.locator('#ch-conversation-search').fill('讨论范围');await(await searched).finished();await page.waitForFunction(()=>document.querySelectorAll('#ch-conversations .ch-conversation-row').length===5);await page.getByRole('button',{name:'查看更多对话',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('#ch-conversations .ch-conversation-row').length>5);assert(await page.locator('#ch-conversations .ch-conversation-row').count()>5);
+  const recent=page.locator('#ch-conversations .ch-conversation-row').first(),pid=await recent.getAttribute('data-project-id'),cid=await recent.getAttribute('data-conversation-id');await recent.locator('.ch-conversation-link').click();await ready();assert.equal(new URL(page.url()).searchParams.get('project'),pid);assert.equal(new URL(page.url()).searchParams.get('conversation'),cid);
+  results.navigation_and_reading={passed:true,thread_messages:38,same_name_projects:2,pagination:true,scroll_restore:true};
+  // Both teaching methods use the same real material/plan reader; no SDK/source calls.
+  for(const [caseId,question,scope] of [['fl-heterogeneity','compare','small'],['sulfide-design','bulk','narrow']]){
+   const start=await post('/api/teaching-cases/start',{request_id:'workbench-case-'+caseId+'-'+Date.now(),case_id:caseId,version:'1.1.0'}),prefixCase=`/api/projects/${start.project_id}/conversations/${start.conversation_id}`;
+   await page.goto(base+`/workspace?project=${start.project_id}&conversation=${start.conversation_id}`);await ready();await page.locator('.case-task').waitFor();
+   const state=()=>get(prefixCase+'/teaching'),choose=async id=>{const old=(await state()).state_version;await page.locator(`[data-case-option="${id}"]`).last().click();await page.waitForFunction(old=>Number(document.querySelector('.ch-teaching')?.dataset.stateVersion)>old,old);await ready();};
+   const auditBefore=await get('/__reliability__/state');await choose('begin');await page.getByRole('button',{name:'查看这三篇文献',exact:true}).click();await page.locator('.ch-paper-card[open]').first().waitFor();assert.equal(await page.getByRole('tab',{name:'文献与报告',exact:true}).getAttribute('aria-selected'),'true');await shot(caseId+'-sources');await page.locator('[data-ref="panelClose"]').click();
+   await choose('continue');await choose(question);await choose('adopt_question');await choose(scope);await choose('show_plan');await page.locator('.ch-messages').getByRole('button',{name:'打开方案',exact:true}).last().click();await page.locator('.ch-plan-review[open]').last().waitFor();assert.equal(await page.getByRole('tab',{name:'研究方案',exact:true}).getAttribute('aria-selected'),'true');await shot(caseId+'-draft');await page.locator('.ch-plan-review[open]').last().getByRole('button',{name:'保存当前方案',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.ch-teaching strong')?.textContent.includes('体验已完成'));
+   await page.locator('[data-ref="panelClose"]').click();await page.locator('[data-ref="downloadToggle"]').click();const dl=page.waitForEvent('download');await page.locator('[data-export-key="teaching-sources"]').getByRole('link',{name:'下载',exact:true}).click();const file=await dl,text=fs.readFileSync(await file.path(),'utf8');assert.match(text,/教学/);assert.match(text,/1.1.0/);fs.writeFileSync(path.join(out,caseId+'-download.md'),text);await page.getByRole('button',{name:'收起下载',exact:true}).click();
+   await page.setViewportSize({width:390,height:844});await page.locator('.ch-messages').getByRole('button',{name:'打开方案',exact:true}).last().click();await page.locator('[data-material-kind="plan"] .ch-plan-review[open]').waitFor();await shot(caseId+'-plan-mobile');await page.locator('[data-ref="panelClose"]').click();await page.setViewportSize({width:1440,height:900});
+   const auditAfter=await get('/__reliability__/state');assert.equal(auditAfter.model_calls.length,auditBefore.model_calls.length);assert.equal(auditAfter.source_calls.length,auditBefore.source_calls.length);results[caseId]={passed:true,model_calls:0,source_calls:0};
+  }
+  assert.deepEqual(errors,[]);assert.deepEqual(outside,[]);fs.writeFileSync(path.join(out,'browser-results.json'),JSON.stringify({passed:true,results,errors,outside,real_model_calls:0,real_source_calls:0},null,2));console.log('PASS workbench convergence',JSON.stringify(results));
+ }catch(e){await page.screenshot({path:path.join(out,(before?'before':'after')+'-failure.png')});fs.writeFileSync(path.join(out,'browser-results.json'),JSON.stringify({passed:false,error:e.message,errors,outside},null,2));throw e;}finally{await browser.close();}
+})().catch(e=>{console.error(e);process.exitCode=1;});

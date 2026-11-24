@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
+from typing import Optional
 
 from core.tools.arxiv_search import search_arxiv
 from core.tools.crossref_search import search_crossref
@@ -23,6 +24,7 @@ FL_DIRECTIONS = (
 
 FL_SECURITY_DIRECTIONS = (
     ("fl_poisoning", "联邦学习模型投毒与后门防御", "federated learning model poisoning backdoor defense robust aggregation"),
+    ("fl_membership_inference", "联邦学习成员推理攻击与隐私审计", "federated learning membership inference attack privacy audit"),
     ("fl_privacy_leak", "梯度泄露与隐私保护", "federated learning gradient inversion privacy leakage differential privacy"),
     ("fl_byzantine", "拜占庭鲁棒聚合与恶意客户端识别", "Byzantine robust federated learning malicious clients aggregation"),
     ("fl_secure_aggregation", "安全聚合与密码学协议", "federated learning secure aggregation homomorphic encryption privacy"),
@@ -96,10 +98,16 @@ def fallback_directions(interest: str, domain: str, english_query: str) -> list[
 def federated_directions(interest: str, domain: str = "") -> list[dict]:
     """有明确子兴趣时优先检索对应问题，避免所有联邦学习请求返回同一组方向。"""
     value = f"{interest} {domain}".lower()
-    security = any(term in value for term in ("网络空间安全", "网络安全", "信息安全", "cybersecurity", "cyber security", "security", "安全", "隐私", "投毒", "后门"))
+    security = any(term in value for term in (
+        "网络空间安全", "网络安全", "信息安全", "cybersecurity", "cyber security",
+        "security", "安全", "隐私", "投毒", "后门",
+        # 成员推理/推断本质是隐私攻击研究，路由到联邦安全方向表
+        "成员推理", "成员推断", "membership",
+    ))
     if security:
         selected = list(FL_SECURITY_DIRECTIONS)
         focus = {
+            "fl_membership_inference": ("成员推理", "成员推断", "membership inference", "membership"),
             "fl_poisoning": ("投毒", "后门", "poison", "backdoor"),
             "fl_privacy_leak": ("隐私", "泄露", "梯度", "privacy", "leak", "gradient"),
             "fl_byzantine": ("拜占庭", "恶意客户端", "byzantine", "malicious client"),
@@ -115,6 +123,52 @@ def federated_directions(interest: str, domain: str = "") -> list[dict]:
     if matched:
         selected += [entry for entry in FL_DIRECTIONS if entry[0] not in matched][:2]
     return [{"id": key, "name": name, "query": query} for key, name, query in selected]
+
+
+def _has_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in (text or ""))
+
+
+def fetch_zh_evidence(zh_query: str, *, per_source: int = 8) -> Optional[dict]:
+    """中文文献检索补充：OpenAlex / S2 均索引了中文期刊论文的标题与摘要。
+
+    用用户的中文原词直接检索，返回与英文方向同构的证据条目
+    （id=direction_zh），供推荐时合并中英文两路证据。失败返回 None。
+    """
+    query = (zh_query or "").strip()
+    if not _has_cjk(query):
+        return None
+    found: list[dict] = []
+    for source, search in (("openalex", search_openalex), ("semantic_scholar", search_semantic_scholar)):
+        try:
+            papers = search(query=query, max_results=per_source, timeout=12)
+        except Exception as exc:
+            logger.warning("中文文献检索失败（source=%s, query=%r）: %s", source, query, exc)
+            continue
+        for paper in papers:
+            meta = paper.to_meta_dict()
+            if not (meta.get("title") and meta.get("url")):
+                continue
+            meta["source"] = source
+            meta["language"] = "zh"
+            found.append(meta)
+    seen: set = set()
+    papers: list[dict] = []
+    for paper in found:
+        key = (paper.get("doi") or paper.get("arxiv_id")
+               or re.sub(r"\W+", "", paper["title"].lower())).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        papers.append(paper)
+    if not papers:
+        return None
+    recent = sum(1 for p in papers if isinstance(p.get("year"), int) and p["year"] >= datetime.now().year - 2)
+    return {
+        "id": "direction_zh", "name": f"中文文献视角：{query}", "query": query,
+        "sample_count": len(papers), "recent_sample_count": recent,
+        "papers": papers[:12],
+    }
 
 
 def fetch_direction_evidence(directions: list[dict], *, per_source: int = 8) -> list[dict]:
@@ -182,6 +236,7 @@ def _matches_direction(paper: dict, direction: dict) -> bool:
         if "federat" not in text:
             return False
         markers = {
+            "fl_membership_inference": ("membership inference", "member inference", "inference attack", "privacy audit", "privacy risk"),
             "fl_poisoning": ("poison", "backdoor", "attack", "robust"),
             "fl_privacy_leak": ("privacy", "gradient", "inversion", "leak"),
             "fl_byzantine": ("byzantine", "malicious", "robust", "aggregat"),
@@ -216,6 +271,9 @@ TOPIC_MARKERS = {
     "非iid": ("non-iid", "non iid", "non independent and identically distributed"),
     "后门": ("backdoor",),
     "梯度反演": ("gradient inversion",),
+    "成员推理": ("membership inference", "member inference", "成员推理", "成员推断"),
+    "成员推断": ("membership inference", "member inference", "成员推理", "成员推断"),
+    "联邦学习": ("federat", "联邦"),
     "拜占庭": ("byzantine",),
     "同态加密": ("homomorphic encryption",),
     "安全聚合": ("secure aggregation",),

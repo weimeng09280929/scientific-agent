@@ -1,0 +1,365 @@
+{
+  "case_id": "sulfide-design",
+  "version": "1.1.0",
+  "title": "硫化物固态电解质：对象与验证设计",
+  "domain": "materials",
+  "method": "experimental",
+  "organized_on": "2026-10-21",
+  "audience": "科研入门者；不需要模型密钥",
+  "learning_goals": [
+    "缩小问题",
+    "区分事实与设想",
+    "设计比较条件",
+    "审阅并采纳方案"
+  ],
+  "settings": "教学设定：只讨论方案，不执行实验。真实设备、期限、预算和权限待另行确认。",
+  "concepts": {
+    "objects": "Li10GeP2S12 与 Li9.54Si1.74P1.44S11.7Cl0.3 组成不同；材料、界面和电池不是同一研究对象。",
+    "terms": "术语相近不等于对象相同。SoLid 仅作为可能撞名的字符串提示，不作为本案例材料文献或证据。",
+    "control": "比较时要说明控制哪些因素，实际操作参数须由专业人员核实。"
+  },
+  "sources": [
+    {
+      "source_id": "lgps",
+      "title": "A lithium superionic conductor",
+      "authors": [
+        "Noriaki Kamaya",
+        "Kenji Homma",
+        "Yuichiro Yamakawa",
+        "Masaaki Hirayama",
+        "Ryoji Kanno",
+        "Masao Yonemura",
+        "Takashi Kamiyama",
+        "Yuki Kato",
+        "Shigenori Hama",
+        "Koji Kawamoto",
+        "Akio Mitsui"
+      ],
+      "year": 2011,
+      "url": "https://www.nature.com/articles/nmat3066",
+      "doi": "10.1038/nmat3066",
+      "summary": "摘要报道 Li10GeP2S12 的三维框架及室温锂离子传导性能。对象是指定组成的固态电解质，不能等同于所有硫化物或完整电池性能。",
+      "reading_scope": "摘要",
+      "verified_on": "2026-10-21",
+      "facts": [
+        {
+          "claim": "摘要报道 Li10GeP2S12 的三维框架及室温锂离子传导性能。对象是指定组成的固态电解质，不能等同于所有硫化物或完整电池性能。",
+          "location": "出版方 Abstract 第 2 段"
+        }
+      ],
+      "redistribution": "仅自行撰写的中文概述与书目信息；不附原文、图片或 PDF。",
+      "verification_urls": [
+        "https://www.nature.com/articles/nmat3066"
+      ]
+    },
+    {
+      "source_id": "review",
+      "title": "Fundamentals of inorganic solid-state electrolytes for batteries",
+      "authors": [
+        "Theodosios Famprikis",
+        "Pieremanuele Canepa",
+        "James A. Dawson",
+        "M. Saiful Islam",
+        "Christian Masquelier"
+      ],
+      "year": 2019,
+      "url": "https://www.nature.com/articles/s41563-019-0431-3",
+      "doi": "10.1038/s41563-019-0431-3",
+      "summary": "综述摘要讨论离子输运、电化学与力学性质，指出界面稳定和物理接触等器件挑战；材料单一传导性能不等于器件可行性。",
+      "reading_scope": "摘要",
+      "verified_on": "2026-10-21",
+      "facts": [
+        {
+          "claim": "综述摘要讨论离子输运、电化学与力学性质，指出界面稳定和物理接触等器件挑战；材料单一传导性能不等于器件可行性。",
+          "location": "出版方 Abstract 第 1、2 句"
+        }
+      ],
+      "redistribution": "仅自行撰写的中文概述与书目信息；不附原文、图片或 PDF。",
+      "verification_urls": [
+        "https://www.nature.com/articles/s41563-019-0431-3"
+      ]
+    },
+    {
+      "source_id": "cell",
+      "title": "High-power all-solid-state batteries using sulfide superionic conductors",
+      "authors": [
+        "Yuki Kato",
+        "Satoshi Hori",
+        "Toshiya Saito",
+        "Kota Suzuki",
+        "Masaaki Hirayama",
+        "Akio Mitsui",
+        "Masao Yonemura",
+        "Hideki Iba",
+        "Ryoji Kanno"
+      ],
+      "year": 2016,
+      "url": "https://www.nature.com/articles/nenergy201630",
+      "doi": "10.1038/nenergy.2016.30",
+      "summary": "出版方目录简介介绍 Li9.54Si1.74P1.44S11.7Cl0.3 及基于该化合物的固态电池。其组成与 LGPS 不同，读文献须区分材料级和器件级对象。",
+      "reading_scope": "出版方目录简介、书目信息和机构报道（未读全文）",
+      "verified_on": "2026-10-21",
+      "facts": [
+        {
+          "claim": "出版方目录简介介绍 Li9.54Si1.74P1.44S11.7Cl0.3 及基于该化合物的固态电池。其组成与 LGPS 不同，读文献须区分材料级和器件级对象。",
+          "location": "Nature Energy 1(4) 本论文目录简介；作者与 DOI 在出版方引用信息及 KEK Reference 核对"
+        }
+      ],
+      "redistribution": "仅自行撰写的中文概述与书目信息；不附原文、图片或 PDF。",
+      "verification_urls": [
+        "https://www.nature.com/nenergy/volumes/1/issues/4",
+        "https://www2.kek.jp/en/newsroom/2016/03/23/0920/"
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "key": "orientation",
+      "title": "认识兴趣和案例条件",
+      "why": "先选一个关注点，后续才能知道要找什么依据；得到的是讨论起点，不是正式研究问题。",
+      "text": "假设你刚开始了解固态电池，发现有的论文讨论电解质材料的传导，有的讨论完整电池。你需要先弄清比较对象，再与导师讨论一份不含实际操作参数的研究设计。你想先关注哪件事？",
+      "options": [
+        {
+          "id": "begin",
+          "label": "先看材料性能怎样可比",
+          "interest_key": "bulk",
+          "next": 1
+        },
+        {
+          "id": "interest_other",
+          "label": "我更关心材料与电池证据的区别",
+          "interest_key": "interface",
+          "next": 1
+        },
+        {
+          "id": "explain",
+          "label": "先解释什么是研究问题",
+          "explanation": "研究兴趣是大范围，问题要说清研究对象、比较因素，以及什么证据能帮助回答。这里的选择可再修改，不会自动保存正式问题。"
+        }
+      ]
+    },
+    {
+      "key": "sources",
+      "title": "资料怎样成为依据",
+      "why": "先了解已有工作，避免把已知事实当成自己的发现；得到一份知道什么、还不知道什么的资料概览。",
+      "text": "这些资料从硫化物电解质材料、固态电池整体和基本研究问题三个角度提供背景。\n\n已知：材料传导性能与完整电池性能不是同一类证据。比较之前，应先核对研究对象、条件与阅读范围。\n\n仍需核对：不同文献的对象和测量条件是否可比，以及界面等环节是否另有证据。当前资料不是完整实验操作手册，也不足以直接给材料排名；证据缺口不等于创新点。",
+      "options": [
+        {
+          "id": "continue",
+          "label": "看完资料，比较两个问题",
+          "next": 2
+        },
+        {
+          "id": "explain",
+          "label": "这些资料能证明什么？",
+          "explanation": "事实只在实际阅读范围内转述；案例的比较方案是待验证的建议，不是本系统获得的结果。"
+        }
+      ]
+    },
+    {
+      "key": "question",
+      "title": "选择具体研究问题",
+      "why": "不同问题需要不同的验证设计。",
+      "text": "下面两个问题都可以讨论。选择只生成候选，点击‘采用这个问题’后才会进入正式研究记录。",
+      "options": [
+        {
+          "id": "bulk",
+          "label": "材料传导性能怎样可比",
+          "next": 3,
+          "question_key": "bulk"
+        },
+        {
+          "id": "interface",
+          "label": "区分体相传导与界面证据",
+          "next": 3,
+          "question_key": "interface"
+        }
+      ]
+    },
+    {
+      "key": "confirm",
+      "title": "明确采用教学问题",
+      "why": "把讨论想法与正式主线分开。",
+      "text": "请核对下面这句话是否是你要研究的内容。正式确认后，方案会围绕它展开。",
+      "options": [
+        {
+          "id": "adopt_question",
+          "label": "采用这个问题",
+          "next": 4
+        },
+        {
+          "id": "back",
+          "label": "返回比较问题",
+          "next": 2
+        }
+      ]
+    },
+    {
+      "key": "constraint",
+      "title": "选择研究范围",
+      "why": "范围决定能否安排可解释的比较；得到一条明确的教学约束。",
+      "text": "为这个教学问题选择一个研究范围。它会改变后续的技术路线和验证设计，不代表你的实际设备或时间条件。",
+      "options": [
+        {
+          "id": "narrow",
+          "label": "限定一个材料体系，先说明对照和缺项",
+          "next": 5,
+          "scope_key": "narrow"
+        },
+        {
+          "id": "broader",
+          "label": "比较两类对象，增加可比性审查",
+          "next": 5,
+          "scope_key": "broader"
+        }
+      ]
+    },
+    {
+      "key": "draft",
+      "title": "形成对应方案草案",
+      "why": "把问题、依据、方法和局限组织起来。",
+      "text": "现在可以把问题、资料和范围组织成方案讨论稿。打开后请先看摘要，再到研究材料中审阅全文；尚未采纳。",
+      "options": [
+        {
+          "id": "show_plan",
+          "label": "整理这份方案草案",
+          "next": 6
+        },
+        {
+          "id": "scope_back",
+          "label": "重新选择范围",
+          "next": 4
+        }
+      ]
+    },
+    {
+      "key": "review",
+      "title": "审阅并采纳方案",
+      "why": "结构完整不等于科学正确。",
+      "text": "先打开方案检查方法和证据，再试一次‘修改条件’，比较新旧草案。确认后点击‘保存当前方案’，最后从顶部‘下载当前产物’导出。",
+      "options": [
+        {
+          "id": "adopt_plan",
+          "label": "保存当前方案"
+        },
+        {
+          "id": "scope_back",
+          "label": "修改条件",
+          "next": 4
+        },
+        {
+          "id": "back",
+          "label": "重新讨论研究问题",
+          "next": 2
+        }
+      ]
+    }
+  ],
+  "questions": {
+    "bulk": {
+      "title": "材料传导性能怎样可比",
+      "content": "比较硫化物电解质传导性能时，哪些研究对象与测量条件必须核对，哪些证据不足以直接排名？"
+    },
+    "interface": {
+      "title": "区分体相传导与界面证据",
+      "content": "如何分别规划硫化物电解质的材料传导和电极接触相关证据，避免把单一材料性能当作完整电池性能？"
+    }
+  },
+  "scopes": {
+    "narrow": "限定一个材料体系，先说明对照和缺项",
+    "broader": "比较两类对象，增加可比性审查"
+  },
+  "variants": {
+    "bulk:narrow": {
+      "objective": "比较硫化物电解质传导性能时，哪些研究对象与测量条件必须核对，哪些证据不足以直接排名？",
+      "method": "先定义材料与测量信息清单，再设计控制条件下的传导比较，不跨文献直接排名。",
+      "validation": "限定一个体系，列出固定条件、重复及误差来源；缺少条件不作确定比较。",
+      "details": {
+        "type": "experimental",
+        "research_object": "指定组成的硫化物电解质材料；样品与条件待确认。",
+        "variables": "拟考察材料对象与传导证据；范围需专业审核。",
+        "controls": "限定体系，固定几何、环境和测量定义；不编造操作参数。",
+        "measurements": "讨论传导测量所需信息和误差记录；仪器及方法待确认。",
+        "repetition_error": "区分样品与测量重复，列出误差；重复数量待确认。",
+        "resource_needs": "材料、设备、场所与人员资质待确认；不提供合成装配或危险操作规程。",
+        "professional_review": "导师及具备资质的实验室须审核可行性与安全；本系统不执行。"
+      }
+    },
+    "bulk:broader": {
+      "objective": "比较硫化物电解质传导性能时，哪些研究对象与测量条件必须核对，哪些证据不足以直接排名？",
+      "method": "先定义材料与测量信息清单，再设计控制条件下的传导比较，不跨文献直接排名。",
+      "validation": "不同对象分组后再核对条件，不合并不可比证据。",
+      "details": {
+        "type": "experimental",
+        "research_object": "指定组成的硫化物电解质材料；样品与条件待确认。",
+        "variables": "拟考察材料对象与传导证据；范围需专业审核。",
+        "controls": "按材料和测量对象分组，明确不可比条件；对照需导师审核。",
+        "measurements": "讨论传导测量所需信息和误差记录；仪器及方法待确认。",
+        "repetition_error": "区分对象差异和测量不确定性，规划分组重复；数量待确认。",
+        "resource_needs": "材料、设备、场所与人员资质待确认；不提供合成装配或危险操作规程。",
+        "professional_review": "导师及具备资质的实验室须审核可行性与安全；本系统不执行。"
+      }
+    },
+    "interface:narrow": {
+      "objective": "如何分别规划硫化物电解质的材料传导和电极接触相关证据，避免把单一材料性能当作完整电池性能？",
+      "method": "分别提出体相传导与界面接触的对照和表征需求，不用单一指标代替器件表现。",
+      "validation": "限定一个体系，列出固定条件、重复及误差来源；缺少条件不作确定比较。",
+      "details": {
+        "type": "experimental",
+        "research_object": "分别界定硫化物电解质与电极接触体系。",
+        "variables": "拟区分传导、界面稳定与接触因素，不凭摘要断言机理。",
+        "controls": "限定体系，固定几何、环境和测量定义；不编造操作参数。",
+        "measurements": "分别规划传导与界面接触的测量需求，不由单项指标推断完整电池性能。",
+        "repetition_error": "区分样品与测量重复，列出误差；重复数量待确认。",
+        "resource_needs": "材料、设备、场所与人员资质待确认；不提供合成装配或危险操作规程。",
+        "professional_review": "导师及具备资质的实验室须审核可行性与安全；本系统不执行。"
+      }
+    },
+    "interface:broader": {
+      "objective": "如何分别规划硫化物电解质的材料传导和电极接触相关证据，避免把单一材料性能当作完整电池性能？",
+      "method": "分别提出体相传导与界面接触的对照和表征需求，不用单一指标代替器件表现。",
+      "validation": "不同对象分组后再核对条件，不合并不可比证据。",
+      "details": {
+        "type": "experimental",
+        "research_object": "分别界定硫化物电解质与电极接触体系。",
+        "variables": "拟区分传导、界面稳定与接触因素，不凭摘要断言机理。",
+        "controls": "按材料和测量对象分组，明确不可比条件；对照需导师审核。",
+        "measurements": "分别规划传导与界面接触的测量需求，不由单项指标推断完整电池性能。",
+        "repetition_error": "区分对象差异和测量不确定性，规划分组重复；数量待确认。",
+        "resource_needs": "材料、设备、场所与人员资质待确认；不提供合成装配或危险操作规程。",
+        "professional_review": "导师及具备资质的实验室须审核可行性与安全；本系统不执行。"
+      }
+    }
+  },
+  "unconfirmed": [
+    "本案例问题的创新性未核实",
+    "未阅读论文全文；需补充合法原文后复核方法细节",
+    "设备、期限、预算、数据或材料权限待确认",
+    "未进行训练或实验，没有实测结果"
+  ],
+  "export_notice": "教学案例，使用预先整理的资料；不是实时检索或实验结果。",
+  "experience": {
+    "scene": "假设你刚开始了解固态电池，发现有的论文讨论电解质材料的传导，有的讨论完整电池。你需要先弄清比较对象，再与导师讨论一份不含实际操作参数的研究设计。你想先关注哪件事？",
+    "landscape": "这些资料从硫化物电解质材料、固态电池整体和基本研究问题三个角度提供背景。\n\n已知：材料传导性能与完整电池性能不是同一类证据。比较之前，应先核对研究对象、条件与阅读范围。\n\n仍需核对：不同文献的对象和测量条件是否可比，以及界面等环节是否另有证据。当前资料不是完整实验操作手册，也不足以直接给材料排名；证据缺口不等于创新点。",
+    "question_help": {
+      "bulk": "先研究怎样公平比较材料传导性能，范围较小，适合从核对对象与条件入门。推荐先选这一项。",
+      "interface": "区分材料传导与电极接触相关证据，关注证据链，而不是只用材料指标解释完整电池。需要更多可比性核对。"
+    },
+    "source_relations": {
+      "lgps": "用来认识硫化物电解质研究对象；比较时仍须核对测量条件，不能将摘要扩写成操作规程。",
+      "review": "用来梳理固态电池研究的背景与条件；不能把综述中的一般问题当成本项目已验证结果。",
+      "cell": "提供从电解质到电池层次的背景线索；实际阅读仅限已标注公开范围，不能据此补写全文细节。"
+    },
+    "faq": {
+      "why": "‘研究固态电池’太宽。先问‘哪些材料、什么测量条件下才可比’，或问‘材料传导与电极接触分别需要什么证据’，就能据此安排对照与核对项。两条路径都合理，并未自动证明创新性。",
+      "terms": "电解质：在电池中承担离子传导的材料。体相传导：关注材料内部的传导；界面：不同材料接触的位置。材料性能与整电池性能的研究对象不同，不能直接互相替代。",
+      "narrow": "可以先限定一个硫化物材料体系，只列清研究对象、对照条件和缺少的证据，不做跨体系排名。方案中的‘修改条件’会产生对应新草案，旧版本保留。",
+      "evidence": "资料提供硫化物电解质及固态电池的背景，但实际阅读范围不都是全文。它们支持区分材料与电池层次，不足以填入确定操作参数、实测指标或安全结论。请在文献卡片查看具体范围。",
+      "conditions": "需要由专业人员确认材料与设备条件、测量方法、对照、重复与误差以及安全审查。这里仅形成研究设计讨论稿，不提供危险操作步骤，也不假设你拥有实验室。"
+    },
+    "scope_changes": {
+      "narrow": "收窄到一个材料体系；保留对象、测量、对照与缺项核对，不作跨体系性能排名，减少不可比因素。",
+      "broader": "扩大到两类对象；增加可比性审查及分别列示的条件和误差，不将材料传导与电池整体指标混在一起。"
+    }
+  }
+}

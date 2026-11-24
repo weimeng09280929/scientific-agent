@@ -5,74 +5,122 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>科研 Agent 系统</title>
     <link rel="stylesheet" href="/static/style.css" />
+    <link rel="stylesheet" href="/static/research-guide.css" />
+    <link rel="stylesheet" href="/static/research-document.css" />
+    <link rel="stylesheet" href="/static/conversation-home.css" />
+    <link rel="stylesheet" href="/static/ui-experience.css" />
 </head>
 <body>
-<div class="app">
+<div id="account-gate" class="account-gate" role="main">
+    <form id="account-form" class="account-card">
+        <h1 id="account-title">科研 Agent</h1>
+        <p id="account-subtitle">登录后继续你的研究工作台</p>
+        <label>邮箱<input name="email" type="email" autocomplete="username" required maxlength="254"></label>
+        <div class="account-password-field">
+            <label for="account-password">密码</label>
+            <div class="account-password-control">
+                <input id="account-password" name="password" type="password" autocomplete="current-password" aria-describedby="account-password-help" required maxlength="256">
+                <button class="account-password-toggle" type="button" data-password-toggle="account-password" data-password-name="密码" aria-controls="account-password" aria-label="显示密码" aria-pressed="false" title="显示密码">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="password-eye-slash" d="m3 3 18 18"/></svg>
+                </button>
+            </div>
+        </div>
+        <div id="account-confirm-row" class="account-password-field" hidden>
+            <label for="account-confirm-password">确认密码</label>
+            <div class="account-password-control">
+                <input id="account-confirm-password" name="confirm_password" type="password" autocomplete="new-password" aria-describedby="account-password-help" minlength="8" maxlength="256" disabled>
+                <button class="account-password-toggle" type="button" data-password-toggle="account-confirm-password" data-password-name="确认密码" aria-controls="account-confirm-password" aria-label="显示确认密码" aria-pressed="false" title="显示确认密码">
+                    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="password-eye-slash" d="m3 3 18 18"/></svg>
+                </button>
+            </div>
+        </div>
+        <p id="account-password-help" class="account-help"><strong>密码要求</strong><br>长度为 8–256 个字符且不超过 1024 字节，支持大小写字母、数字和特殊符号。<br>建议组合使用，避免常见、已泄露或在其他网站重复使用的密码。<br>部分常见弱密码及全部由相同字符组成的密码无法注册。</p>
+        <button id="account-submit" type="submit">登录</button>
+        <button id="account-switch" class="account-switch" type="button" hidden>注册新账号</button>
+        <p id="account-message" role="status">正在核对登录状态…</p>
+        <details class="account-help" open>
+            <summary>注册、登录与账号说明</summary>
+            <p>这是本地账号。邮箱用于登录，系统不会发送验证邮件或密码找回邮件。注册成功后，用刚注册的邮箱和密码登录。</p>
+            <p>15 分钟内，同一登录来源或同一邮箱累计失败 5 次后，会暂停对应范围的登录 15 分钟。同一来源的新账号也需等到解锁。注册按来源独立限流，15 分钟内累计提交 5 次后暂停注册 15 分钟。</p>
+            <p>登录有效期为 12 小时，到期需重新登录。退出会结束当前会话。账号项目与免登录历史项目分别存储。</p>
+        </details>
+    </form>
+</div>
+<div class="app" hidden>
     <!-- 左侧导航 -->
     <aside class="sidebar">
         <div class="sidebar-header">
             <h1 class="sidebar-title">科研 Agent 系统</h1>
+            <button type="button" id="ch-sidebar-collapse" class="ch-sidebar-toggle" aria-label="收起侧栏" title="收起侧栏">◧</button>
             <div class="sidebar-subtitle">Scientific Research Assistant</div>
+            <div id="account-controls" hidden><span id="account-email"></span><button type="button" id="account-logout">退出</button></div>
         </div>
         <nav class="nav" id="nav">
-            <div class="nav-section">项目</div>
-            <div class="nav-item" data-page="dashboard">
-                <span>总览 Dashboard</span>
-            </div>
-            <div class="nav-item" data-page="create">
-                <span>新建项目</span>
-            </div>
-            <div class="nav-item" data-page="topic-discovery">
-                <span>方向推荐</span>
-                <span class="nav-badge muted" id="badge-topic-discovery" style="display:none">!</span>
-            </div>
-            <div class="nav-item" data-page="progress">
-                <span>研究进度</span>
-                <span class="nav-badge muted" id="badge-progress" style="display:none">0</span>
-            </div>
-            <div class="nav-section">基本任务 · 文献调研</div>
-            <div class="nav-item" data-page="research-report">
-                <span>调研报告</span>
-                <span class="nav-badge muted" id="badge-report-gaps" style="display:none">0</span>
-            </div>
+            <button type="button" class="nav-new" id="ch-new">＋ 新研究</button>
+            <button type="button" class="ch-side-link" id="ch-project-new" disabled>在本项目新建对话</button>
+            <section class="ch-current-materials" aria-label="当前项目资料">
+            <div class="nav-section">当前项目资料</div>
+            <button type="button" id="ch-current-project" class="ch-current-project">尚未选择项目</button>
             <div class="nav-item" data-page="papers">
-                <span>论文浏览</span>
+                <span>文献与资料</span>
                 <span class="nav-badge muted" id="badge-papers" style="display:none">0</span>
             </div>
-            <div class="nav-item" data-page="gaps">
-                <span>研究缺口</span>
-                <span class="nav-badge muted" id="badge-gaps" style="display:none">0</span>
-            </div>
-            <div class="nav-section">产出物</div>
-            <div class="nav-item" data-page="claims">
-                <span>Claim</span>
-                <span class="nav-badge muted" id="badge-claims" style="display:none">0</span>
-            </div>
             <div class="nav-item" data-page="experiments">
-                <span>实验</span>
+                <span>研究方案</span>
                 <span class="nav-badge muted" id="badge-experiments" style="display:none">0</span>
             </div>
-            <div class="nav-section">协作</div>
             <div class="nav-item" data-page="notes">
-                <span>灵感笔记</span>
+                <span>笔记</span>
                 <span class="nav-badge muted" id="badge-notes" style="display:none">0</span>
             </div>
-            <div class="nav-item" data-page="human">
-                <span>人工节点</span>
-                <span class="nav-badge" id="badge-human" style="display:none">!</span>
+            <details class="nav-more"><summary>更多</summary>
+            <div class="nav-item" data-page="human"><span>待确认事项</span><span class="nav-badge" id="badge-human" style="display:none">!</span></div>
+            <div class="nav-item" data-page="methods">
+                <span>研究指南</span>
+            </div>
+            <div class="nav-item" data-page="progress">
+                <span>任务活动</span>
+                <span class="nav-badge muted" id="badge-progress" style="display:none">0</span>
+            </div>
+            <div class="nav-item" data-page="topic-discovery">
+                <span>选题探索</span>
+                <span class="nav-badge muted" id="badge-topic-discovery" style="display:none">!</span>
+            </div>
+            <div class="nav-item" data-page="research-report">
+                <span>研究现状</span>
+                <span class="nav-badge muted" id="badge-report-gaps" style="display:none">0</span>
+            </div>
+            <div class="nav-item" data-page="gaps">
+                <span>研究问题</span>
+                <span class="nav-badge muted" id="badge-gaps" style="display:none">0</span>
+            </div>
+            <div class="nav-item" data-page="writing">
+                <span>历史材料</span>
+                <span class="nav-badge muted" id="badge-writing" style="display:none">0</span>
+            </div>
+            </details>
+            </section>
+            <div class="ch-history-scroll" aria-label="项目与对话历史" tabindex="0">
+            <section class="ch-project-nav" aria-label="最近对话">
+                <button type="button" class="ch-side-heading ch-group-toggle" id="ch-recent-group" aria-expanded="true" aria-controls="ch-recent-body">最近对话</button>
+                <div id="ch-recent-body">
+                <label for="ch-conversation-search" class="rg-sr-only">搜索对话或所属项目</label><input id="ch-conversation-search" type="search" placeholder="搜索对话…" maxlength="200" disabled />
+                <div id="ch-conversations" aria-live="polite"></div>
+                <button type="button" class="ch-side-link" id="ch-conversation-collapse" hidden>收起对话</button>
+                </div>
+            </section>
+            <section class="ch-project-nav" aria-label="项目">
+                <button type="button" class="ch-side-heading ch-group-toggle" id="ch-project-group" aria-expanded="true" aria-controls="ch-project-body">项目</button>
+                <div id="ch-project-body">
+                <label for="ch-project-search" class="rg-sr-only">搜索项目</label>
+                <input id="ch-project-search" type="search" placeholder="搜索项目…" />
+                <div id="ch-projects" aria-live="polite"></div>
+                <button type="button" class="ch-side-link" id="ch-project-expand" aria-expanded="false">展开更多</button>
+                <button type="button" class="ch-side-link" id="ch-project-manage">管理全部项目</button>
+                </div>
+            </section>
             </div>
         </nav>
-        <div class="sidebar-download" id="sidebar-download" style="display:none">
-            <div class="sidebar-download-head">
-                <span class="sidebar-download-title">📥 快速下载</span>
-            </div>
-            <select class="sidebar-download-fmt" id="sidebar-download-fmt">
-                <option value="md">Markdown (.md)</option>
-                <option value="docx">Word (.docx)</option>
-                <option value="pdf">PDF (.pdf)</option>
-            </select>
-            <div class="sidebar-download-list" id="sidebar-download-list"></div>
-        </div>
         <div class="sidebar-notes" id="sidebar-notes" style="display:none">
             <div class="sidebar-notes-head">
                 <span class="sidebar-notes-title">科研灵感记录</span>
@@ -84,18 +132,18 @@
             <div class="sidebar-notes-list" id="sidebar-notes-list"></div>
         </div>
         <div class="sidebar-footer">
-            v1.0.2 · 2026-08-15
-            修复：发现报告下载 500 / Word·PDF 表格错位 / 引用链表格精简
+            <button type="button" id="ch-sidebar-help" class="ch-side-link">使用帮助</button><span>研究辅助 · 证据留存</span>
         </div>
     </aside>
 
     <!-- 主内容区 -->
     <div class="main">
         <header class="topbar">
+            <button class="btn btn-secondary" id="ch-menu" aria-label="展开或收起项目导航" aria-controls="nav" aria-expanded="false">☰</button>
             <div class="topbar-breadcrumb" id="topbar-breadcrumb">
                 <span class="breadcrumb-root" id="breadcrumb-root">科研 Agent 系统</span>
                 <span class="breadcrumb-sep">›</span>
-                <span class="breadcrumb-current" id="topbar-title">总览 Dashboard</span>
+                <span class="breadcrumb-current" id="topbar-title">项目总览</span>
             </div>
             <div class="topbar-spacer"></div>
             <div class="topbar-status" id="topbar-status" style="display:none">
@@ -107,13 +155,41 @@
                 <strong id="current-project-id">未创建</strong>
             </div>
             <button class="topbar-help" id="topbar-help" title="查看快捷键与帮助">?</button>
+            <button class="btn guide-toggle" id="research-guide-toggle">返回科研对话</button>
         </header>
+        <div class="research-layout" id="research-layout">
+        <section class="research-main" aria-label="项目工作区">
         <!-- 流程导航条：独立容器，不被页面内容 clear 影响（灵感笔记页隐藏） -->
         <div class="flow-nav-host" id="flow-nav-host"></div>
         <main class="content" id="content">
             <!-- 由 app.js 渲染 -->
             <div class="loading">加载中…</div>
         </main>
+        </section>
+        <aside id="research-guide" class="research-guide" aria-label="科研指导">
+            <div class="rg-heading"><div><span class="rg-kicker">RESEARCH COPILOT</span><h2>科研指导</h2></div><button id="rg-close" class="rg-icon" aria-label="收起科研指导" title="收起科研指导">×</button></div>
+            <p class="rg-description">围绕当前项目讨论，保留你的研究判断。</p>
+            <div class="rg-context"><span id="rg-page">总览</span><span id="rg-mode">准备就绪</span></div>
+            <p id="rg-focus" class="rg-focus" hidden></p>
+            <div class="rg-tabs" role="tablist" aria-label="科研指导内容">
+                <button id="rg-chat-tab" role="tab" aria-selected="true" aria-controls="rg-chat">项目对话</button>
+                <button id="rg-records-tab" role="tab" aria-selected="false" aria-controls="rg-records">研究记录</button>
+            </div>
+            <section id="rg-chat" class="rg-chat" role="tabpanel" aria-labelledby="rg-chat-tab">
+                <div id="rg-starters" class="rg-starters"></div>
+                <details class="rg-materials"><summary>对话参考材料 <span id="rg-material-count"></span></summary><div id="rg-materials"></div></details>
+                <div class="rg-thread-tools"><button id="rg-refresh" type="button">刷新材料</button><button id="rg-latest" type="button">最新对话 ↓</button></div>
+                <div id="rg-messages" class="rg-messages" role="log" aria-label="项目对话记录" aria-live="polite" tabindex="0"></div>
+                <div id="rg-error" class="rg-error" role="status" hidden></div>
+                <form id="rg-form" class="rg-form">
+                    <label for="rg-input" class="rg-sr-only">向科研指导提问</label>
+                    <textarea id="rg-input" maxlength="6000" rows="3" placeholder="讨论当前方向、论文，或下一步怎么做…"></textarea>
+                    <div class="rg-compose-footer"><span>Ctrl / ⌘ + Enter</span><button id="rg-send" type="submit" class="btn">发送</button></div>
+                </form>
+            </section>
+            <section id="rg-records" class="rg-records" role="tabpanel" aria-labelledby="rg-records-tab" hidden></section>
+        </aside>
+        </div>
     </div>
 </div>
 
@@ -135,14 +211,7 @@
         <div class="help-panel-body">
             <div class="help-section">
                 <div class="help-section-title">键盘快捷键</div>
-                <div class="help-row"><kbd>1</kbd> - <span>总览 Dashboard</span></div>
-                <div class="help-row"><kbd>2</kbd> - <span>新建项目</span></div>
-                <div class="help-row"><kbd>3</kbd> - <span>研究进度</span></div>
-                <div class="help-row"><kbd>4</kbd> - <span>调研报告</span></div>
-                <div class="help-row"><kbd>5</kbd> - <span>论文浏览</span></div>
-                <div class="help-row"><kbd>6</kbd> - <span>研究缺口</span></div>
-                <div class="help-row"><kbd>7</kbd> - <span>Claim 列表</span></div>
-                <div class="help-row"><kbd>8</kbd> - <span>实验列表</span></div>
+                <div id="help-navigation"></div>
                 <div class="help-row"><kbd>?</kbd> / <kbd>F1</kbd> - <span>打开本帮助</span></div>
                 <div class="help-row"><kbd>Esc</kbd> - <span>关闭弹窗</span></div>
                 <div class="help-row"><kbd>Ctrl</kbd>+<kbd>Enter</kbd> - <span>提交灵感笔记/表单</span></div>
@@ -152,16 +221,16 @@
                 <div class="help-flow">
                     <span class="help-flow-step">1. 新建项目</span>
                     <span class="help-flow-arrow">→</span>
-                    <span class="help-flow-step">2. 等待运行</span>
+                    <span class="help-flow-step">2. 选题与阅读</span>
                     <span class="help-flow-arrow">→</span>
-                    <span class="help-flow-step">3. 处理人工节点</span>
+                    <span class="help-flow-step">3. 确认研究问题</span>
                     <span class="help-flow-arrow">→</span>
-                    <span class="help-flow-step">4. 查看产出</span>
+                    <span class="help-flow-step">4. 形成并审阅方案</span>
                 </div>
             </div>
             <div class="help-section">
                 <div class="help-section-title">产物下载</div>
-                <p class="help-note">每个页面顶部「下载产出」支持 Markdown / Word / PDF 三种格式。</p>
+                <p class="help-note">在科研对话顶部打开「下载当前产物」。完整方案在「研究材料」或「研究方案」中审阅；草案须明确采纳后才成为正式方案。历史材料仍可查看与导出。</p>
             </div>
         </div>
     </div>
@@ -169,6 +238,49 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="/static/app.js"></script>
+<template id="ch-home-introduction">
+    <span class="ch-eyebrow">SCIENTIFIC RESEARCH · HUMAN + AGENT</span>
+    <h2>从一个科研兴趣，逐步形成有依据的研究问题与方法草案。</h2>
+    <p class="ch-home-position">面向科研新手，围绕研究问题组织讨论，让资料、判断依据和方法草案逐步积累在同一个项目中。</p>
+    <details class="ch-home-flow">
+        <summary>研究引导：六步可往返，从适合你的地方开始</summary>
+        <ol class="ch-home-steps">
+            <li><strong>说说兴趣与条件</strong><p>通过对话了解方向、已有基础、时间和资源。不知道具体题目也可以开始。</p></li>
+            <li><strong>逐步明确研究方向</strong><p>结合你的回答缩小范围，确定值得进一步了解的问题。</p></li>
+            <li><strong>导入或检索文献</strong><p>整理相关资料，区分标题、摘要和正文。联网检索需明确发起，受当前服务配置、额度和来源可用性限制。</p></li>
+            <li><strong>结合资料讨论</strong><p>讨论研究做了什么、依据与限制，整理值得追问的问题；以实际读取内容为准。</p></li>
+            <li><strong>确认研究问题与创新点候选</strong><p>区分文献支持的内容与待验证设想，由你决定是否采用；不保证候选具有创新性。</p></li>
+            <li><strong>形成方法草案</strong><p>讨论步骤、资源、比较方式和可行性，审阅后明确采纳。</p></li>
+        </ol>
+        <p class="ch-home-flow-note">这些步骤可以往返，不必逐项完成。已有方向或已有论文，都可以从对应入口开始。</p>
+    </details>
+    <p class="ch-home-relationship">项目像一个持续研究课题的资料文件夹，集中保存文献、笔记、已确认的研究问题和正式方案。一个项目可以开启多段独立对话，分别讨论不同问题。后续讨论可以参考已保存的项目信息，具体使用范围以实际读取内容为准。</p>
+    <div class="ch-openers">
+        <button type="button" data-entry="0">第一次做研究，带我入门。<span>只填入开场文字；发送后讨论兴趣与条件，逐步整理可选方向。</span></button>
+        <button type="button" data-entry="1">我有方向，想了解研究现状。<span>只填入开场文字；发送后讨论方向与资料需求，不会直接检索。</span></button>
+        <button type="button" data-entry="2">我有研究问题，想设计或完善方案。<span>只填入开场文字；发送后核对问题与方法，满足依据条件后才可生成待审阅草案。</span></button>
+    </div>
+    <div class="ch-home-starts"><button type="button" class="ch-text-button" data-home-action="upload">我已有论文，先添加资料</button><button type="button" class="ch-text-button" data-home-action="projects">选择已有项目</button></div>
+    <small>研究引导止于方案设计，不执行实验、训练或论文生成，也不保证创新成立。</small>
+</template>
+
+<link rel="stylesheet" href="/static/teaching-cases.css">
+<!-- Inert manifest: local-auth loads these in order after resolving identity. -->
+<script type="text/plain" data-account-script src="/static/vendor/marked/marked.min.js"></script>
+<script type="text/plain" data-account-script src="/static/vendor/dompurify/purify.min.js"></script>
+<script type="text/plain" data-account-script src="/static/research-document.js"></script>
+<script type="text/plain" data-account-script src="/static/resource-protection.js"></script>
+<script type="text/plain" data-account-script src="/static/vendor/mathjax/tex-svg-full.js"></script>
+<script type="text/plain" data-account-script src="/static/research-navigation.js"></script>
+<script type="text/plain" data-account-script src="/static/research-flow.js"></script>
+<script type="text/plain" data-account-script src="/static/project-management.js"></script>
+<script type="text/plain" data-account-script src="/static/project-background.js"></script>
+<script type="text/plain" data-account-script src="/static/conversation-home.js"></script>
+<script type="text/plain" data-account-script src="/static/teaching-cases.js"></script>
+<script type="text/plain" data-account-script src="/static/project-library.js"></script>
+<script type="text/plain" data-account-script src="/static/workspace-overview.js"></script>
+<script type="text/plain" data-account-script src="/static/research-guide.js"></script>
+<script type="text/plain" data-account-script src="/static/app.js"></script>
+<script src="/static/local-auth.js"></script>
 </body>
 </html>

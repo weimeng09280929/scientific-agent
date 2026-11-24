@@ -1248,7 +1248,7 @@ class DiscoveryValidateAgent(AgentNode):
 
         # 系统设计要求 硬要求：与公开数据库（Materials Project + OQMD）交叉验证
         # 无 API key 时降级为规则交叉验证（基于已知热电材料体系物理范围）
-        if store is not None and relationships:
+        if not dry_run and store is not None and relationships:
             try:
                 from core.tools import (
                     mp_cross_validate_discovery,

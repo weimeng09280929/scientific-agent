@@ -148,7 +148,7 @@ def agentic_search(
     if not token:
         logger.debug("Sciverse token 未配置，agentic_search 跳过")
         return []
-    if not query.strip():
+    if not query.strip() or max_results <= 0:
         return []
 
     try:
@@ -166,8 +166,12 @@ def agentic_search(
     # 限流保护
     time.sleep(0.5)
 
-    data = resp.json()
-    return _parse_agentic_response(data, source_subquery=source_subquery)
+    try:
+        data = resp.json()
+        return _parse_agentic_response(data, source_subquery=source_subquery)[:min(max_results, 50)]
+    except (ValueError, TypeError, AttributeError):
+        logger.warning("Sciverse agentic_search 返回无效 JSON 数据")
+        return []
 
 
 def _parse_agentic_response(
@@ -259,6 +263,8 @@ def meta_search(
     if not query.strip():
         return []
 
+    if max_results <= 0:
+        return []
     payload: dict[str, Any] = {"query": query, "limit": min(max_results, 50)}
     if filters:
         payload["filters"] = filters
@@ -276,8 +282,12 @@ def meta_search(
         return []
 
     time.sleep(0.5)
-    data = resp.json()
-    return _parse_agentic_response(data, source_subquery=source_subquery)
+    try:
+        data = resp.json()
+        return _parse_agentic_response(data, source_subquery=source_subquery)[:min(max_results, 50)]
+    except (ValueError, TypeError, AttributeError):
+        logger.warning("Sciverse meta_search 返回无效 JSON 数据")
+        return []
 
 
 # ===== content：原文上下文回读 =====

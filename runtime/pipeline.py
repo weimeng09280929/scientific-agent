@@ -35,11 +35,14 @@ from core.artifacts import ArtifactContentStore, ArtifactManager, ProvenanceVali
 from core.config import GlobalConfig, get_config
 from core.knowledge import KnowledgeStore
 from core.llm import LLMRegistry
-from core.orchestration.context import ExecutionContext
+from core.orchestration.context import ExecutionContext, ContextKey
+from core.experiment_results import experiment_signature
 from core.orchestration.graph import Graph, GraphRunner
 from core.orchestration.node import HumanRequest, HumanResponse, NodeResult, NodeStatus
 from core.state.lifecycle import LifecycleStage, StageStatus
 from core.state.session import ProjectSession
+from core.product_boundary import ExecutionPolicy, ProductExecutionRestricted, inspect_boundary, public_boundary, NOTICE
+from core.workflow_checkpoint import restore_context, save_context
 
 from stages.common import (
     ARTIFACT_MANAGER,
@@ -50,6 +53,13 @@ from stages.common import (
     DISCOVERY_SEARCH_SPACE,
     DRY_RUN,
     EXPERIMENT_OUTCOME,
+    EXPERIMENT_IDS,
+    DESIGN_CLAIM_IDS,
+    DESIGN_METHOD_CONTENT,
+    DESIGN_METHOD_ARTIFACT_ID,
+    EXPERIMENT_CONFIGS,
+    IDEATION_IDEA_IDS,
+    IDEATION_VALIDATED_IDEA_IDS,
     KNOWLEDGE_STORE,
     LLM_REGISTRY,
     PROJECT_DIR,
@@ -62,6 +72,8 @@ from stages.common import (
     RESEARCH_PAPER_METAS,
     RESEARCH_TOPIC,
     TOPIC_DISCOVERY_INTEREST,
+    TOPIC_DISCOVERY_TRENDS,
+    TOPIC_DISCOVERY_ANALYSIS,
     TOPIC_DISCOVERY_RECOMMENDATIONS,
     TOPIC_DISCOVERY_SELECTED_TOPIC,
 )
@@ -78,7 +90,7 @@ class StageResult:
     """单阶段执行结果。"""
 
     stage: LifecycleStage
-    status: str  # success / pending_human / failed / aborted / experiment_failed
+    status: str  # success / pending_human / failed / aborted / restricted
     summary: str = ""
     node_history: list[dict] = field(default_factory=list)
     # 若 status=pending_human，附带当前人工请求
@@ -87,6 +99,10 @@ class StageResult:
     experiment_outcome: Optional[dict] = None
     # 建议的下一步动作
     recommendation: str = ""
+    product_boundary: Optional[dict] = None  # status=restricted never counts as success
+
+    def __post_init__(self):
+        self.stage = LifecycleStage(self.stage)
 
 
 @dataclass
@@ -94,7 +110,7 @@ class PipelineResult:
     """全流程执行结果。"""
 
     project_id: str
-    status: str  # completed / pending_human / failed / aborted / experiment_failed / stopped
+    status: str  # completed / pending_human / failed / aborted / stopped / restricted (legacy: experiment_*)
     completed_stages: list[LifecycleStage] = field(default_factory=list)
     current_stage: Optional[LifecycleStage] = None
     summary: str = ""
@@ -103,17 +119,27 @@ class PipelineResult:
     node_history: list[dict] = field(default_factory=list)
     # 额外的上下文数据（如方向推荐的推荐列表、趋势数据等）
     extra: dict = field(default_factory=dict)
+    product_boundary: Optional[dict] = None
 
 
 class Pipeline:
-    """端到端科研论文生成 Pipeline。
+    """默认止于 DESIGN 的研究方案流水线。
 
-    串联 5 个生命周期阶段，处理状态流转、依赖注入、实验成败判断、人工节点。
+    旧五阶段编排仅供显式 INTERNAL_LEGACY 架构夹具使用。
     """
 
-    def __init__(self, config: Optional[GlobalConfig] = None):
+    def __init__(self, config: Optional[GlobalConfig] = None, *, execution_policy: ExecutionPolicy = ExecutionPolicy.PRODUCT_PLAN):
+        if not isinstance(execution_policy, ExecutionPolicy):
+            raise TypeError("execution_policy must be an explicit ExecutionPolicy enum")
         self.config = config or get_config()
         self.paths = self.config.paths
+        self.execution_policy = execution_policy
+
+    def _preflight(self, project_id, **kwargs):
+        boundary = inspect_boundary(self.paths, project_id, **kwargs)
+        if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN and boundary["restricted"]:
+            raise ProductExecutionRestricted(boundary)
+        return boundary
 
     # ===== 项目初始化 =====
 
@@ -135,6 +161,9 @@ class Pipeline:
         Returns:
             (session, ctx) — 项目会话与执行上下文
         """
+        boundary = self._preflight(project_id)
+        if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN and boundary["reason"] == "design_generated":
+            raise ProductExecutionRestricted({**boundary, "message": "已有方法方案已保留，请使用独立的方案修订入口；不能重新初始化历史流程。"})
         # 创建项目会话
         session = ProjectSession.create(project_id, self.paths)
 
@@ -183,6 +212,9 @@ class Pipeline:
                    否则恢复后 RESEARCH_TOPIC 为空，检索阶段会拿到空主题。
             domain: 研究领域。留空时从 KV 恢复上次保存的领域。
         """
+        boundary = self._preflight(project_id)
+        if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN and boundary["reason"] == "design_generated":
+            raise ProductExecutionRestricted({**boundary, "message": "已有方法方案已保留，请审阅或独立修订，不恢复后续流水线。"})
         session = ProjectSession.load(project_id, self.paths)
         ctx = ExecutionContext(project_id=project_id)
         # 重新注入依赖（依赖不持久化在 context 里，每次恢复时重建）
@@ -196,6 +228,8 @@ class Pipeline:
         ctx.set(PROJECT_ROOT, self.paths.root)
         ctx.set(PROJECT_DIR, self.paths.project_dir(project_id))
         # 补：恢复研究主题（否则下游 research 阶段拿到空主题）
+        restore_context(ctx, store, self.config.dry_run)
+        topic = topic or store.get_kv("research.topic", "")
         ctx.set(RESEARCH_TOPIC, topic)
         # 持久化主题到 KV（resume 时用户可能重新输入主题，同步更新）
         if topic:
@@ -210,6 +244,46 @@ class Pipeline:
             except Exception:  # noqa: BLE001
                 domain = ""
         ctx.set(PROJECT_DOMAIN, domain or "")
+        # 兼容尚无完整执行材料快照的旧项目；优先保留快照中精确的当前版本引用。
+        if not ctx.has(IDEATION_IDEA_IDS):
+            ideas = [i.idea_id for i in store.list_ideas() if i.status != "rejected"]
+            ctx.set(IDEATION_IDEA_IDS, ideas)
+        if not ctx.has(IDEATION_VALIDATED_IDEA_IDS):
+            ctx.set(IDEATION_VALIDATED_IDEA_IDS, [i.idea_id for i in store.list_ideas() if i.status in ("validated", "adopted")])
+        if not ctx.has(DESIGN_CLAIM_IDS):
+            ctx.set(DESIGN_CLAIM_IDS, [c.claim_id for c in store.list_claims() if c.status.value != "superseded"])
+        manager = ctx.get(ARTIFACT_MANAGER)
+        if not ctx.has(DESIGN_METHOD_CONTENT):
+            from core.knowledge.schema import ArtifactType
+            methods = manager.list_artifacts(ArtifactType.METHOD_DOC)
+            if methods:
+                ctx.set(DESIGN_METHOD_CONTENT, manager.read_content(methods[-1]) or "")
+                ctx.set(DESIGN_METHOD_ARTIFACT_ID, methods[-1].artifact_id)
+        if not ctx.has(EXPERIMENT_IDS) and not ctx.has(EXPERIMENT_CONFIGS):
+            experiments = store.list_experiments()
+            ctx.set(EXPERIMENT_IDS, [e.experiment_id for e in experiments])
+            ctx.set(EXPERIMENT_CONFIGS, [e.config for e in experiments])
+        # 兼容旧版“0 条思路通过也标记阶段完成”的坏快照，重新评审而非卡死在方法节点。
+        if (session.is_stage_done(LifecycleStage.IDEATION)
+                and session.status_of(LifecycleStage.DESIGN) != StageStatus.DONE
+                and ctx.get(IDEATION_IDEA_IDS, []) and not ctx.get(IDEATION_VALIDATED_IDEA_IDS, [])
+                and not store.list_experiments()):
+            session.rollback_to(LifecycleStage.IDEATION, reason="修复旧版空思路完成状态，保留材料重新评审")
+            ctx.current_stage = "ideation"
+            ctx.current_node_id = "idea_validate"
+            ctx.record_node_result("idea_validate", "ideation_validate", "failed", "旧状态无已确认思路，重新评审")
+        outcome = ctx.get(EXPERIMENT_OUTCOME,{}) or {}
+        from stages.common import WRITING_OUTLINE,WRITING_STYLE_PROFILE,WRITING_DRAFT_CONTENT
+        outline = ctx.get(WRITING_OUTLINE,{}) or {}
+        if (session.status_of(LifecycleStage.WRITING) != StageStatus.DONE and outcome.get("ready_for_writing")
+                and not outcome.get("success") and outline and outline.get("mode") != "results_report"):
+            from core.writing_report import REPORT_STYLE,build_results_outline
+            store.save_kv("writing.previous_outline",outline)
+            store.save_kv("writing.previous_unconfirmed_draft",ctx.get(WRITING_DRAFT_CONTENT,""))
+            ctx.set(WRITING_OUTLINE,build_results_outline(store,ctx.get(DESIGN_CLAIM_IDS,[]),ctx.get(EXPERIMENT_IDS,[]),topic))
+            ctx.set(WRITING_STYLE_PROFILE,REPORT_STYLE)
+            ctx.current_stage="writing"
+            ctx.record_node_result("outline","writing_outline","success","将未验证创新提纲修复为有实测依据的结果报告结构")
         return session, ctx
 
     def _restore_research_outputs(
@@ -433,10 +507,27 @@ class Pipeline:
         Returns:
             StageResult
         """
+        stage = LifecycleStage(stage)
+        if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN:
+            try:
+                boundary = self._preflight(ctx.project_id, session=session, ctx=ctx)
+                if boundary["reason"] == "design_generated":
+                    raise ProductExecutionRestricted({**boundary, "message": "方案阶段已经结束；请使用独立的方法修订入口，不重跑历史阶段。"})
+                if stage.index() > LifecycleStage.DESIGN.index():
+                    raise ProductExecutionRestricted({"max_stage":"design","restricted":True,"reason":"stage_not_supported","message":NOTICE})
+            except ProductExecutionRestricted as exc:
+                return StageResult(stage=stage, status="restricted", summary=str(exc), node_history=ctx.history(), product_boundary=exc.boundary)
         graph = self._build_stage_graph(stage)
+        def recorded(history):
+            store = ctx.get(KNOWLEDGE_STORE)
+            if store is not None:
+                save_context(ctx, store, self.config.dry_run)
+            if on_progress is not None:
+                on_progress(history)
+
         runner = GraphRunner(
             graph, ctx,
-            on_node_recorded=on_progress,
+            on_node_recorded=recorded,
             on_node_started=on_node_started,
         )
 
@@ -451,8 +542,18 @@ class Pipeline:
                 triggered_by="pipeline",
             )
 
+        history = ctx.history()
+        last = history[-1] if history else {}
+        recover_node = last.get("node_id")
+        can_recover = ctx.current_stage == stage.value and recover_node in graph.nodes
         ctx.current_stage = stage.value
-        runner.start()
+        if can_recover:
+            if last.get("status") == NodeStatus.SUCCESS.value:
+                successors = graph.successors(recover_node)
+                recover_node = successors[0] if successors else None
+            runner.start_at(recover_node)
+        else:
+            runner.start()
 
         # 处理人工节点阻塞
         while runner.is_pending_human():
@@ -469,6 +570,11 @@ class Pipeline:
             # 有回调，调用回调获取响应
             req = runner.pending_human_request()
             resp = human_callback(req)
+            if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN:
+                try:
+                    self._preflight(ctx.project_id, session=session, ctx=ctx)
+                except ProductExecutionRestricted as exc:
+                    return StageResult(stage=stage,status="restricted",summary=str(exc),node_history=ctx.history(),product_boundary=exc.boundary)
             runner.resume_after_human(resp)
 
         # 检查执行结果
@@ -491,6 +597,9 @@ class Pipeline:
             )
 
         # 阶段成功完成
+        store = ctx.get(KNOWLEDGE_STORE)
+        if store is not None:
+            save_context(ctx, store, self.config.dry_run)
         session.complete_stage(
             reason=f"阶段 {stage.value} 完成",
             triggered_by="pipeline",
@@ -546,14 +655,31 @@ class Pipeline:
         Returns:
             PipelineResult
         """
+        if force_writing and self.execution_policy is ExecutionPolicy.PRODUCT_PLAN:
+            raise ValueError("force_writing 不能绕过当前产品的研究方案阶段上限")
+        if force_writing and not self.config.dry_run:
+            raise ValueError("真实模式不能通过 force_writing 绕过结果审核；可先保存写作骨架或回填真实结果")
+        if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN:
+            try:
+                boundary = self._preflight(project_id)
+            except ProductExecutionRestricted as exc:
+                return PipelineResult(project_id=project_id,status="restricted",summary=str(exc),product_boundary=exc.boundary)
+            if boundary["stage_statuses"].get("design")=="done":
+                return PipelineResult(project_id=project_id,status="stopped",current_stage=LifecycleStage.DESIGN,
+                    completed_stages=[s for s in LifecycleStage.ordered() if s.index()<=LifecycleStage.DESIGN.index() and boundary["stage_statuses"].get(s.value)=="done"],
+                    summary="已有方法方案已保留，请核对关联问题后审阅、修改或导出；不启动实验。",node_history=boundary["history"],product_boundary=public_boundary(boundary))
+            if stop_before is None or stop_before.index()>LifecycleStage.EXPERIMENT.index():
+                stop_before = LifecycleStage.EXPERIMENT
         # 初始化或恢复
         if resume:
             session, ctx = self.resume_project(project_id, topic, domain)
             # resume 模式下 ctx 是全新的，需恢复 topic 与 research 阶段产出，
             # 否则下游阶段（ideation/design/...）读不到 paper_ids / cross_validation_report，
             # 导致 brainstorm 拿到空输入、生成与主题无关的占位思路（串主题根因）
+            topic = topic or ctx.get(RESEARCH_TOPIC, "")
             ctx.set(RESEARCH_TOPIC, topic)
-            ctx.set(PROJECT_DOMAIN, domain)
+            if domain:
+                ctx.set(PROJECT_DOMAIN, domain)
             if session.is_stage_done(LifecycleStage.RESEARCH):
                 self._restore_research_outputs(ctx, project_id, topic)
         else:
@@ -577,17 +703,69 @@ class Pipeline:
 
             # 跳过已完成的阶段（resume 模式）
             if session.is_stage_done(stage):
-                result.completed_stages.append(stage)
-                continue
+                if stage != LifecycleStage.EXPERIMENT or session.is_stage_done(LifecycleStage.WRITING):
+                    result.completed_stages.append(stage)
+                    continue
+                signature_key = ContextKey[str]("experiment.review_fingerprint")
+                current_signature = experiment_signature(ctx.get(KNOWLEDGE_STORE), ctx.get(EXPERIMENT_IDS, []))
+                if (session.status_of(LifecycleStage.WRITING) != StageStatus.NOT_STARTED
+                        and ctx.get(signature_key) == current_signature
+                        and (ctx.get(EXPERIMENT_OUTCOME, {}) or {}).get("ready_for_writing")):
+                    # Preserve the writing cursor/history and draft when inputs
+                    # have not changed. Re-reviewing here would erase that cursor.
+                    result.completed_stages.append(stage)
+                    continue
+                if session.status_of(LifecycleStage.WRITING) != StageStatus.NOT_STARTED:
+                    from stages.common import WRITING_DRAFT_CONTENT, WRITING_OUTLINE
+                    store = ctx.get(KNOWLEDGE_STORE)
+                    draft = ctx.get(WRITING_DRAFT_CONTENT, "")
+                    if draft:
+                        versions = store.get_kv("writing.recovered_draft_history", []) or []
+                        if not versions or versions[-1].get("content") != draft:
+                            versions.append({"content": draft, "outline": ctx.get(WRITING_OUTLINE, {}), "reason": "结果发生变化或旧版缺少复核指纹，恢复前保留未确认草稿"})
+                            store.save_kv("writing.recovered_draft_history", versions)
+                # 实验规划已经完成，回填后只重做结果复核，不重新生成/覆盖任务包。
+                from stages.experiment.agents import AnomalyCheckAgent, ClaimVerifyAgent, ExperimentOutcomeAssessAgent
+                reviewers = (AnomalyCheckAgent("anomaly_check"), ClaimVerifyAgent("claim_verify"), ExperimentOutcomeAssessAgent("experiment_outcome_assess"))
+                for index, node in enumerate(reviewers):
+                    ctx.current_stage = stage.value
+                    ctx.current_node_id = node.node_id
+                    if on_node_started is not None:
+                        try:
+                            on_node_started(node.node_id, [reviewers[index+1].node_id] if index+1 < len(reviewers) else ["provenance_check"])
+                        except Exception:
+                            logger.warning("结果复核开始回调失败，继续执行")
+                    evaluated = node.run(ctx)
+                    ctx.record_node_result(node.node_id,node.node_type,evaluated.status.value,evaluated.summary)
+                    save_context(ctx,ctx.get(KNOWLEDGE_STORE),self.config.dry_run)
+                    if on_progress is not None:
+                        try:
+                            on_progress(ctx.history())
+                        except Exception:
+                            logger.warning("结果复核进度回调失败，继续执行")
+                    if evaluated.status == NodeStatus.FAILED:
+                        result.status = "failed"
+                        result.summary = evaluated.summary or evaluated.error or "结果复核失败"
+                        result.node_history = ctx.history()
+                        return result
+                save_context(ctx, ctx.get(KNOWLEDGE_STORE), self.config.dry_run)
+                stage_result = StageResult(stage=stage, status="success", node_history=ctx.history())
 
             # 执行阶段
-            stage_result = self.run_stage(
-                session, ctx, stage, human_callback,
-                on_progress=on_progress,
-                on_node_started=on_node_started,
-            )
+            else:
+                stage_result = self.run_stage(
+                    session, ctx, stage, human_callback,
+                    on_progress=on_progress,
+                    on_node_started=on_node_started,
+                )
             result.current_stage = stage
             result.node_history = stage_result.node_history
+
+            if stage_result.status == "restricted":
+                result.status = "restricted"
+                result.summary = stage_result.summary
+                result.product_boundary = stage_result.product_boundary
+                return result
 
             if stage_result.status == "pending_human":
                 result.status = "pending_human"
@@ -605,21 +783,37 @@ class Pipeline:
                 result.summary = stage_result.summary
                 return result
 
+            if stage_result.status != "success":
+                result.status = "failed"
+                result.summary = f"未知或未完成的阶段返回：{stage_result.status}；未计作成功"
+                return result
             # 阶段成功
             result.completed_stages.append(stage)
+            if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN and stage == LifecycleStage.DESIGN:
+                result.status="stopped"
+                result.summary="方法方案已生成并经过本阶段审核；请核对当前问题及关联方案，再审阅、修改或导出。未进入实验和写作。"
+                result.recommendation="review_plan"
+                result.product_boundary={"max_stage":"design","restricted":False,"reason":"design_generated","message":result.summary}
+                return result
 
             # ===== 关键：experiment 后判断是否进入 writing =====
             if stage == LifecycleStage.EXPERIMENT:
                 outcome = ctx.get(EXPERIMENT_OUTCOME, {})
+                ctx.set(ContextKey[str]("experiment.review_fingerprint"), experiment_signature(ctx.get(KNOWLEDGE_STORE), ctx.get(EXPERIMENT_IDS, [])))
+                save_context(ctx, ctx.get(KNOWLEDGE_STORE), self.config.dry_run)
                 result.experiment_outcome = outcome
                 if force_writing:
                     # force_writing：绕过实验成败判断，强制进入 writing（架构验证用）
                     result.summary = (
                         "force_writing=True：绕过实验成败判断，强制进入 writing 阶段"
                     )
-                elif not outcome.get("success", False):
+                elif not (outcome.get("success", False) or outcome.get("ready_for_writing", False)):
                     # 实验失败是科研常态，不强行写论文
-                    result.status = "experiment_failed"
+                    if outcome.get("recommendation") == "wait_for_user_results":
+                        # 规划型定位：实验已导出、等用户本地执行回填——不是失败
+                        result.status = "experiment_pending"
+                    else:
+                        result.status = "experiment_failed"
                     result.summary = outcome.get(
                         "summary", "实验未验证核心 Claim"
                     )
@@ -679,9 +873,11 @@ class Pipeline:
         Returns:
             PipelineResult，summary 含发现概览，node_history 含 discovery 节点历史
         """
+        if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN:
+            return PipelineResult(project_id=project_id,status="restricted",summary="关系发现扩展不属于本轮研究方案流程；历史报告仍可查看、导出。",
+                product_boundary={"max_stage":"design","restricted":True,"reason":"unsupported_subflow"})
         if resume:
             session, ctx = self.resume_project(project_id, topic)
-            session, ctx = self.resume_project(project_id)
         else:
             session, ctx = self.start_project(project_id, topic)
 
@@ -699,8 +895,9 @@ class Pipeline:
                 result.status = "pending_human"
                 result.summary = research_result.summary
                 return result
-            if research_result.status in ("failed", "aborted"):
-                result.status = research_result.status
+            if research_result.status != "success":
+                result.status = research_result.status if research_result.status in ("failed", "aborted", "restricted") else "failed"
+                result.product_boundary = research_result.product_boundary
                 result.summary = f"research 阶段{research_result.status}: {research_result.summary}"
                 return result
             result.completed_stages.append(LifecycleStage.RESEARCH)
@@ -811,6 +1008,13 @@ class Pipeline:
         Returns:
             PipelineResult，summary 含推荐与选择概览
         """
+        try:
+            boundary = self._preflight(project_id)
+        except ProductExecutionRestricted as exc:
+            return PipelineResult(project_id=project_id,status="restricted",summary=str(exc),product_boundary=exc.boundary)
+        if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN and boundary["reason"] == "design_generated":
+            return PipelineResult(project_id=project_id, status="stopped", current_stage=LifecycleStage.DESIGN,
+                summary="已有方案已保留，请审阅、修改或导出，不重新启动选题。", product_boundary=public_boundary(boundary))
         if resume:
             session, ctx = self.resume_project(project_id, interest, domain)
         else:
@@ -821,20 +1025,43 @@ class Pipeline:
         # 设置研究兴趣
         ctx.set(TOPIC_DISCOVERY_INTEREST, interest)
         # 设置研究领域（推荐主题时按该领域给出具体的研究对象与切入点）
-        ctx.set(PROJECT_DOMAIN, domain)
+        ctx.set(PROJECT_DOMAIN, domain or ctx.get(PROJECT_DOMAIN, ""))
 
         # 运行 topic_discovery 子图
         from stages.topic_discovery.graph import build_topic_discovery_graph
 
+        # 修复旧缓存中由通用安全模板造成的跨领域推荐，不重新抓取论文。
+        from core.tools.direction_evidence import is_federated_learning
+        cached_recs = ctx.get(TOPIC_DISCOVERY_RECOMMENDATIONS, []) or []
+        if is_federated_learning(interest, domain) and "大模型" not in interest and any("大模型" in r.get("topic", "") for r in cached_recs):
+            from stages.topic_discovery.agents import TopicRecommendAgent
+            from stages.topic_discovery.io_schema import TopicRecommendInput
+            repaired = TopicRecommendAgent("topic_recommend")._evidence_fallback(TopicRecommendInput(
+                interest=interest, trend_data=ctx.get(TOPIC_DISCOVERY_TRENDS, {}), analysis=ctx.get(TOPIC_DISCOVERY_ANALYSIS, {})), domain)
+            if repaired:
+                ctx.set(TOPIC_DISCOVERY_RECOMMENDATIONS, repaired)
+
         graph = build_topic_discovery_graph()
+        recover_stage, recover_node = ctx.current_stage, ctx.current_node_id
+        def record_discovery(history):
+            save_context(ctx, ctx.get(KNOWLEDGE_STORE), self.config.dry_run)
+            if on_progress is not None:
+                on_progress(history)
         runner = GraphRunner(
             graph, ctx,
-            on_node_recorded=on_progress,
+            on_node_recorded=record_discovery,
             on_node_started=on_node_started,
         )
         ctx.current_stage = "topic_discovery"
 
-        runner.start()
+        if resume and recover_stage == "topic_discovery" and recover_node in graph.nodes:
+            last = (ctx.history() or [{}])[-1]
+            if last.get("node_id") == recover_node and last.get("status") == NodeStatus.SUCCESS.value:
+                successors = graph.successors(recover_node)
+                recover_node = successors[0] if successors else None
+            runner.start_at(recover_node)
+        else:
+            runner.start()
 
         # 推荐结果就绪（进入人工等待前），推给外部（Web 层可在 pending_human 展示卡片）
         if on_recommendations is not None:
@@ -848,9 +1075,15 @@ class Pipeline:
                 req = runner.pending_human_request()
                 result.status = "pending_human"
                 result.summary = "方向推荐等待用户选择主题"
+                result.node_history = ctx.history()
                 return result
             req = runner.pending_human_request()
             resp = human_callback(req)
+            if self.execution_policy is ExecutionPolicy.PRODUCT_PLAN:
+                try:
+                    self._preflight(project_id, session=session, ctx=ctx)
+                except ProductExecutionRestricted as exc:
+                    return PipelineResult(project_id=project_id, status="restricted", summary=str(exc), product_boundary=exc.boundary)
             runner.resume_after_human(resp)
 
         if runner.is_aborted():
@@ -900,8 +1133,9 @@ class Pipeline:
                 result.status = "pending_human"
                 result.summary = f"方向推荐完成 → research 阶段等待人工输入"
                 return result
-            if research_result.status in ("failed", "aborted"):
-                result.status = research_result.status
+            if research_result.status != "success":
+                result.status = research_result.status if research_result.status in ("failed", "aborted", "restricted") else "failed"
+                result.product_boundary = research_result.product_boundary
                 result.summary = f"research 阶段{research_result.status}: {research_result.summary}"
                 return result
             result.completed_stages.append(LifecycleStage.RESEARCH)

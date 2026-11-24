@@ -8,7 +8,7 @@
     # 设 SRA_DRY_RUN=false 或 --no-dry-run
     python -m runtime.cli run --topic "..." --no-dry-run
 
-    # 跳过论文写作（只跑到实验阶段）
+    # 提前停止（默认最多到方案，不能用 writing 参数扩大范围）
     python -m runtime.cli run --topic "..." --stop-before writing
 
     # 恢复中断的项目
@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime
@@ -94,7 +95,7 @@ def auto_human_callback(req: HumanRequest) -> HumanResponse:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    """运行全流程。"""
+    """运行研究方案流程，最多到 DESIGN。"""
     _load_env()
     config = get_config()
 
@@ -135,6 +136,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     # dry_run 用自动确认回调（让全流程跑通）；真实模式用交互式回调
     human_cb = auto_human_callback if config.dry_run else cli_human_callback
 
+    if args.force_writing:
+        print("错误：当前产品止于研究方案，force_writing 不可用。")
+        return 1
     pipeline = Pipeline(config=config)
     result: PipelineResult = pipeline.run_pipeline(
         project_id=project_id,
@@ -193,19 +197,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     _load_env()
     config = get_config()
 
-    from core.state.session import ProjectSession
-
-    session = ProjectSession.load(args.project_id, config.paths)
+    from core.product_boundary import inspect_boundary, historical_stage
+    boundary = inspect_boundary(config.paths, args.project_id)
+    current = historical_stage(boundary)
     print(f"项目 ID: {args.project_id}")
-    print(f"当前阶段: {session.current_stage().value}")
+    print(f"历史执行阶段: {current}")
+    print(f"产品上限: design；{boundary['message']}")
     print("\n各阶段状态:")
     for stage in LifecycleStage.ordered():
-        status = session.status_of(stage)
-        marker = "✓" if status.value == "done" else ("→" if stage == session.current_stage() else "○")
-        print(f"  {marker} {stage.value}: {status.value}")
+        status = boundary['stage_statuses'].get(stage.value, 'not_started')
+        marker = "✓" if status == "done" else ("→" if stage.value == current else "○")
+        print(f"  {marker} {stage.value}: {status}")
 
     # 快照历史
-    history = session.snapshot_history()
+    index = config.paths.project_snapshots(args.project_id) / 'index.json'
+    history = json.loads(index.read_text(encoding='utf-8')) if index.is_file() else []
     print(f"\n快照数: {len(history)}")
     return 0
 
@@ -218,11 +224,11 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     # run
-    p_run = sub.add_parser("run", help="运行全流程")
+    p_run = sub.add_parser("run", help="运行研究方案流程（最多到 design）")
     p_run.add_argument("--topic", required=True, help="研究主题")
     p_run.add_argument("--project-id", default=None, help="项目 ID（默认自动生成）")
     p_run.add_argument("--no-dry-run", action="store_true", help="禁用 dry_run，启用真实 API 调用")
-    p_run.add_argument("--force-writing", action="store_true", help="强制进入 writing 阶段（绕过实验成败判断，dry_run 下验证写作架构用）")
+    p_run.add_argument("--force-writing", action="store_true", help="仅保留旧参数兼容；当前产品将拒绝强制写作")
     p_run.add_argument("--stop-before", default=None, help="在某阶段前停止（research/ideation/design/experiment/writing）")
     p_run.add_argument("--verbose", action="store_true", help="输出详细节点历史")
     p_run.set_defaults(func=cmd_run)

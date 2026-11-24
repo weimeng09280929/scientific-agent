@@ -318,7 +318,7 @@ class ProvenanceValidator:
 
     # ===== 校验 =====
 
-    def validate_for_writing(self, artifact_id: EntityId) -> None:
+    def validate_for_writing(self, artifact_id: EntityId, *, results_report: bool = False) -> None:
         """校验 Artifact 是否可进入论文写作阶段。
 
         要求：
@@ -336,7 +336,7 @@ class ProvenanceValidator:
             )
 
         unverified = chain.find_unverified_claims()
-        if unverified:
+        if unverified and not results_report:
             raise ProvenanceError(
                 f"存在 {len(unverified)} 个未验证的 Claim，无法进入写作阶段："
                 f"{[n.entity_id for n in unverified]}"
@@ -346,7 +346,7 @@ class ProvenanceValidator:
         uncompleted_exp = [
             n for n in chain.nodes.values()
             if n.entity_type == EntityType.EXPERIMENT
-            and n.status != "completed"
+            and n.status not in ({"completed", "failed", "anomaly_detected"} if results_report else {"completed"})
         ]
         if uncompleted_exp:
             raise ProvenanceError(

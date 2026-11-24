@@ -25,6 +25,8 @@ htmlcov/
 # 项目数据（每个科研项目独立目录，含知识库/快照/产出物，不入库）
 projects/
 !projects/.gitkeep
+.project-trash/
+.project-backups/
 
 # 配置中的敏感凭据
 .env
@@ -58,7 +60,7 @@ _test_api.py
 # 临时调试脚本 / 验证脚本 / Edge 测试 profile
 _*.py
 _cdp_*.py
-_edge_*/ 
+_edge_*/
 *.log
 diag_*.py
 verify_*.py
@@ -78,3 +80,36 @@ _cleanup_*.py
 # 临时对比/工作目录（仓库克隆副本，勿入库）
 _cmp_repo_kaijie/
 _cmp_work/
+
+# 本地审查与临时测试目录，不属于源码发行内容
+.pytest-*/
+.pytest*/
+.workbuddy/
+.trae-html-share-packages/
+pytest_report.xml
+tests/last_full_report.json
+tests/last_quality_report.json
+docs/acceptance-test-results.xml
+discovery_real_log.txt
+materials_run_log.txt
+对话留存.md
+*.db-wal
+*.db-shm
+
+# 包入口不属于临时 _*.py 脚本
+!__init__.py
+
+# 本地验收 / 演示产物与实例锁（不随源码发布）
+output/
+tmp/
+.tmp-image2ppt-deps/
+.screenshots/
+.sra-instance.json
+.sra-instance.lock
+docs/demo-screenshots/
+
+# docs 仅保留 Markdown 文档与必要配图；浏览器验收记录、真实请求正文、下载文献不入库
+docs/**/*
+!docs/**/
+!docs/**/*.md
+!docs/images/**

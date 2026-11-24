@@ -1,24 +1,25 @@
 """design 阶段 Agent / Human 节点实现。
 
 节点拓扑（借鉴 AI-Researcher 原子概念分解）：
-    AtomDecomposeAgent（AI-Researcher：原子概念分解，建立公式↔代码映射）
-    → MethodFormalizeAgent（将方法形式化为公式与伪代码）
+    AtomDecomposeAgent（分解适合本研究方法的组成）
+    → MethodFormalizeAgent（整理方法与论证/验证设计）
     → StageCheckpoint
     → MethodReviewHuman（用户确认方法）
     → ClaimEvidenceLinkAgent（抽取 Claim 并关联证据）
     → MethodArtifactAgent（生成方法文档 Artifact）
 
 核心思想（AI-Researcher）：把方法拆为最小可独立验证的原子概念，
-每个概念建立「数学公式 ↔ 代码实现」双向映射，确保论文中的公式与
-实验代码一一对应，避免「论文写一套、代码做一套」。
+仅在确有计算实现时建立「数学公式 ↔ 代码实现」映射。
+理论和实验设计不要求代码；旧字段和内部计算演示保留兼容。
 
 执行模式：
 - dry_run=True  ：用占位数据返回，不调用 LLM（默认，验证架构用）
-- dry_run=False ：真实调用配置的 LLM（glm-5.3-flash），真实入库 Claim/Artifact
+- dry_run=False ：调用当前配置的 LLM，保存方法材料（不执行实验）
 """
 from __future__ import annotations
 
 import logging
+from core.document_math import MATH_DOCUMENT_GUIDE
 from typing import Optional
 
 from pydantic import BaseModel, Field
@@ -26,7 +27,7 @@ from pydantic import BaseModel, Field
 from core.artifacts import ArtifactManager
 from core.knowledge import Artifact, ArtifactType, Claim, ClaimStatus, KnowledgeStore, Paper
 from core.llm import LLMRegistry
-from core.orchestration.context import ExecutionContext
+from core.orchestration.context import ContextKey, ExecutionContext
 from core.orchestration.node import (
     AgentNode,
     HumanNode,
@@ -73,8 +74,8 @@ class AtomConceptSchema(BaseModel):
 
     concept_name: str = Field(description="概念名（snake_case）")
     description: str = Field(description="概念描述")
-    formula_latex: str = Field(description="对应数学公式（LaTeX）")
-    code_stub: str = Field(description="对应代码骨架（Python stub）")
+    formula_latex: str = Field(default="", description="适用时提供数学公式；非数学组成留空")
+    code_stub: str = Field(default="", description="仅计算实现需要代码骨架；其他研究类型留空")
     dependencies: list[str] = Field(default_factory=list, description="依赖的其他 concept_name")
     input_spec: str = Field(default="", description="该概念的输入（数据/特征/参数）")
     output_spec: str = Field(default="", description="该概念的输出（结果/中间量）")
@@ -120,11 +121,11 @@ class AtomDecomposeAgent(AgentNode):
     """原子概念分解 Agent。
 
     借鉴 AI-Researcher 的核心方法「原子概念分解」：把方法拆为最小可独立
-    验证的原子概念，每个概念建立「数学公式 ↔ 代码实现」双向映射。
+    验证的原子概念。仅计算实现适用时建立公式与代码的映射。
 
     设计要点：
-    - 原子概念应互相正交，每个可独立验证（便于实验阶段逐概念实现与测试）
-    - 每个概念同时给出 formula_latex 与 code_stub，确保论文公式与代码一一对应
+    - 原子概念按计算、理论或实验设计适配，可独立讨论其论证或验证义务
+    - formula_latex 与 code_stub 不适用时留空，不对所有学科要求公式代码对应
     - dependencies 标注概念间依赖，形成 DAG
     - formula_code_map 显式记录映射状态
     """
@@ -167,13 +168,15 @@ class AtomDecomposeAgent(AgentNode):
                     output_schema=AtomDecomposeSchema,
                     system=(
                         f"研究主题：{topic}\n"
+                        f"用户本轮修改要求：{ctx.get(ContextKey[str]('design.review_comments'), '')}\n"
                         "你是科研方法设计助手。借鉴 AI-Researcher 的原子概念分解思想，"
-                        "把方法拆为 4-8 个最小可独立验证的原子概念（多学科课题应包含："
-                        "问题定义、表征/特征构造、核心算子、约束或正则化、评估指标，"
-                        "以及与 baseline 对比的验证原子概念），每个概念必须同时给出"
-                        "数学公式（LaTeX）、代码实现骨架（Python stub）、明确的输入输出，"
+                        "把方法拆为最小可独立讨论的组成，按计算研究、理论研究或实验研究设计适配。"
+                        "计算研究关注任务、基线、公平比较与复现；理论研究关注定义、假设、"
+                        "待论证命题、证明义务与反例；实验设计关注变量、对照、测量、误差与专业审核。"
+                        "类型不明确时标记待确认，不按学科强行推断；不要求所有方法包含表征或核心算子。"
+                        "明确输入输出；数学公式和代码仅在适用时填写，否则留空，不能强行套用算法模板。"
                         "并标注概念间依赖。"
-                        "确保公式与代码一一对应（status=mapped），避免「论文写一套、代码做一套」。"
+                        "只有确有计算实现的组成需要公式与代码对应。其余部分说明论证或比较方法。"
                         "所有原子概念必须紧扣上述研究主题，不得偏离。"
                     ),
                     prompt=(
@@ -183,8 +186,10 @@ class AtomDecomposeAgent(AgentNode):
                     ),
                 )
                 atom_concepts = [ac.model_dump() for ac in result.atom_concepts]
+                if not atom_concepts:
+                    raise ValueError("模型没有返回方法组成")
                 formula_code_map = [m.model_dump() for m in result.formula_code_map]
-                # 兜底：若 LLM 漏给映射表，自动从 atom_concepts 构造
+                # 仅恢复已经提供的公式/代码对；不能给理论/非计算组成补造映射。
                 if not formula_code_map and atom_concepts:
                     formula_code_map = [
                         {
@@ -194,11 +199,13 @@ class AtomDecomposeAgent(AgentNode):
                             "status": "mapped",
                         }
                         for ac in atom_concepts
+                        if ac["formula_latex"].strip() and ac["code_stub"].strip()
                     ]
             except Exception as e:
-                logger.warning("AtomDecompose 真实调用失败，回退占位: %s", e)
-                atom_concepts, formula_code_map = self._placeholder(topic)
+                return NodeResult(status=NodeStatus.FAILED, error=f"方法分解失败：{type(e).__name__}", summary="未生成方法组成，未使用通用占位方案，请修正后重试")
         else:
+            if not dry_run:
+                return NodeResult(status=NodeStatus.FAILED, error="模型未连接或缺少已保存的研究思路", summary="请先保存并确认研究思路，再制定方法")
             atom_concepts, formula_code_map = self._placeholder(topic)
 
         output = AtomDecomposeOutput(
@@ -322,51 +329,47 @@ class MethodFormalizeAgent(AgentNode):
 
         if not dry_run and registry is not None:
             try:
-                resp = registry.complete(
+                # 空文本重试：LLM 偶发返回空内容，空方法文档会让方法页一片空白
+                resp = None
+                for attempt in range(2):
+                    resp = registry.complete(
                     task_type=self.task_type,
                     system=(
                         "你是科研方法形式化助手。基于已分解的原子概念与公式↔代码映射，"
-                        "整合为完整的方法文档（含数学公式与算法伪代码），"
-                        "结构：动机 → 核心概念定义 → 算法伪代码 → 复杂度分析。"
-                        "保持公式与代码的对应关系，输出 Markdown 格式。"
+                        "整理为供审阅的方法讨论文档，按计算研究、理论研究或实验设计适配。"
+                        "领域不能直接决定方法；方法不明确时标记待确认。"
+                        "公式、伪代码和复杂度仅在实际必要时出现，不强制公式—代码映射。输出 Markdown。" + MATH_DOCUMENT_GUIDE +
+                        "若项目明确为复现或验收，只整理已有算法与可执行协议，不发明新算法或证明新理论；"
+                        "每节只保留执行和审核所需内容，全文控制在1800汉字及必要公式、表格和简短伪代码以内。"
                     ),
                     prompt=(
                         f"原始 idea：{idea_text}\n\n"
                         f"原子概念：\n{input_obj.atom_concepts}\n\n"
                         f"公式↔代码映射：\n{input_obj.formula_code_map}\n\n"
                         f"研究主题：{topic}\n"
-                        "请输出完整的方法文档（Markdown 格式），必须严格包含以下 7 个章节：\n"
-                        "## 1. 问题定义与符号表\n"
-                        "- 明确定义所有数学符号（如 N, K, θ, α, β 等）\n"
-                        "- 用表格形式列出「符号 | 含义 | 取值范围」\n"
-                        "- 形式化描述问题（输入、输出、约束）\n"
-                        "## 2. 方法概述\n"
-                        "- 一段话概述方法核心思想，紧扣上述研究主题\n"
-                        "## 3. 与已有方法对比及选择理由\n"
-                        "- 列出 2-4 种该研究主题下的现有/经典方法（或相关工作中最接近的 baseline）\n"
-                        "- 用对比表给出：方法 | 核心思想 | 优势 | 局限 | 与本文方法的关系\n"
-                        "- 明确说明本文方案的动机：为什么它在这些已有方法之上更优或更适配\n"
-                        "## 4. 核心公式设计\n"
-                        "- 逐个给出关键公式（LaTeX，用 $$ ... $$ 包裹），每个公式前有文字说明设计动机\n"
-                        "- 公式之间有逻辑递进关系\n"
-                        "- 关键参数给出推荐取值或取值范围\n"
-                        "## 5. 算法伪代码\n"
-                        "- 用 Algorithm 风格的伪代码描述完整流程\n"
-                        "- 标出输入、输出与关键超参数\n"
-                        "## 6. 复杂度分析\n"
-                        "- 时间复杂度与空间复杂度分析\n"
-                        "## 7. 实验设计建议\n"
-                        "- 建议 2-4 组对比实验：baseline 对照、消融实验、参数敏感性分析各一组\n"
-                        "- 给出数据集/评估指标建议，以及每组实验的预期结果\n"
-                        "保持公式与代码的对应关系，每个公式都能在原子概念中找到对应实现。\n"
-                        "所有符号必须在符号表中定义后使用，不得突兀。"
+                        f"用户本轮修改要求：{ctx.get(ContextKey[str]('design.review_comments'), '')}\n"
+                        "按九部分整理：研究目标与问题、相关工作与依据、待验证设想、对象或材料条件、"
+                        "方法路线、比较/验证/论证设计、时间资源可行性、局限与待确认事项、参考来源。\n"
+                        "计算研究说明基线、比较预算、评估和复现；理论研究说明定义、假设、待论证命题、"
+                        "证明义务、反例和边界，不要求训练集、准确率或代码；实验设计只规划变量、对照、"
+                        "测量、重复误差和专业审核，不提供具体危险操作。未知设备、期限、预算与参数标记待确认。\n"
+                        "文献事实、用户条件、系统建议、待核实信息须区分；不给虚构参考文献或已取得结果，"
+                        "不强称新方法或创新成立；使用的数学符号先解释。"
                     ),
                 )
-                method_content = resp.text
+                    if resp is not None and (resp.text or "").strip():
+                        break
+                    logger.warning(
+                        "MethodFormalize 第 %d 次调用返回空文本，重试", attempt + 1
+                    )
+                method_content = (resp.text if resp else "") or ""
+                if not method_content.strip():
+                    raise ValueError("模型返回空方法文档")
             except Exception as e:
-                logger.warning("MethodFormalize 真实调用失败，回退占位: %s", e)
-                method_content = self._placeholder(input_obj, topic)
+                return NodeResult(status=NodeStatus.FAILED, error=f"方法生成失败：{type(e).__name__}", summary="方法生成未完成，未使用占位文档；请检查模型配置后重试")
         else:
+            if not dry_run:
+                return NodeResult(status=NodeStatus.FAILED, error="模型未连接", summary="未生成方法文档，请先配置可用模型")
             method_content = self._placeholder(input_obj, topic)
 
         output = MethodFormalizeOutput(method_content=method_content)
@@ -511,12 +514,25 @@ class MethodReviewHuman(HumanNode):
     output_schema = MethodReviewOutput
     output_keys: dict = {}
 
+    def continue_after_human(self, response: HumanResponse, ctx: ExecutionContext) -> NodeResult:
+        if response.action == "abort":
+            return super().continue_after_human(response, ctx)
+        text = (response.text or "").strip()
+        if response.action == "continue" and text.lower() in ("approve", "通过", "ok", "y", "yes"):
+            return super().continue_after_human(response, ctx)
+        if text:
+            ctx.set(ContextKey[str]("design.review_comments"), text)
+            result = MethodFormalizeAgent("method_formalize").run(ctx)
+            if result.status != NodeStatus.SUCCESS:
+                return result
+        return self.run(ctx)
+
     def _build_input(self, ctx: ExecutionContext) -> NodeInput:
         return NodeInput()
 
     def _render_prompt(self, ctx: ExecutionContext) -> str:
         method = ctx.get(DESIGN_METHOD_CONTENT, "")
-        preview = method[:500] if method else "(空)"
+        preview = method if method else "(空)"
         return (
             "方法形式化结果如下：\n"
             f"{preview}\n\n"
@@ -639,11 +655,12 @@ class ClaimEvidenceLinkAgent(AgentNode):
 
                 # 兜底：若 LLM 未抽取出 Claim，用占位
                 if not claim_ids:
-                    claim_ids = self._placeholder_claims(store, available_paper_ids)
+                    raise ValueError("未抽取到有依据的研究论断")
             except Exception as e:
-                logger.warning("ClaimEvidenceLink 真实调用失败，回退占位: %s", e)
-                claim_ids = self._placeholder_claims(store, available_paper_ids)
+                return NodeResult(status=NodeStatus.FAILED, error=f"论断整理失败：{type(e).__name__}", summary="未整理出有依据的论断，未生成占位结论；请检查方法与文献后重试")
         else:
+            if not dry_run:
+                return NodeResult(status=NodeStatus.FAILED, error="模型或知识库未连接", summary="尚未完成论断与证据关联")
             # 占位：用 new_id 生成合法 ID（不真实入库）
             claim_ids = [KnowledgeStore.new_id() for _ in range(3)]
 

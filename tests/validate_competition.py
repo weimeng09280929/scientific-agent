@@ -201,10 +201,11 @@ def check_basic_task_report_quality() -> dict[str, Any]:
     import core.config as _cfgmod
     _cfgmod._default_config = None
     from runtime.pipeline import Pipeline
+    from core.product_boundary import ExecutionPolicy
 
     cfg = get_config()
     cfg.dry_run = True
-    pipeline = Pipeline(config=cfg)
+    pipeline = Pipeline(config=cfg, execution_policy=ExecutionPolicy.INTERNAL_LEGACY)
     project_id = f"validate_comp_{os.getpid()}"
     topic = "热电材料构效关系赛题验证"
 

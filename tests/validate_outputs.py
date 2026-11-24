@@ -101,10 +101,11 @@ def _make_project() -> tuple[str, str]:
     _cfgmod._default_config = None
     from core.config import get_config
     from runtime.pipeline import Pipeline
+    from core.product_boundary import ExecutionPolicy
 
     cfg = get_config()
     cfg.dry_run = True
-    pipeline = Pipeline(config=cfg)
+    pipeline = Pipeline(config=cfg, execution_policy=ExecutionPolicy.INTERNAL_LEGACY)
 
     project_id = f"validate_quality_{os.getpid()}"
     topic = "热电材料的构效关系与性能优化：基于文献驱动的材料发现智能体"

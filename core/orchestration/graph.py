@@ -186,6 +186,30 @@ class GraphRunner:
         self._state.current_node_id = self._graph.entry_node
         self._step()
 
+    def start_at(self, node_id: str | None) -> None:
+        """从持久化材料对应的节点恢复；不重跑已完成的模型步骤。"""
+        if node_id is not None and node_id not in self._graph.nodes:
+            raise GraphExecutionError("恢复节点不属于当前阶段")
+        self._state = GraphRunnerState()
+        self._state.current_node_id = node_id
+        from core.orchestration.node import CheckpointNode
+        for history in self._ctx.history():
+            recorded_id = history.get("node_id")
+            if recorded_id not in self._graph.nodes:
+                continue
+            if history.get("status") == NodeStatus.SUCCESS.value:
+                self._state.completed_nodes.add(recorded_id)
+                if isinstance(self._graph.nodes[recorded_id], CheckpointNode):
+                    self._state.last_checkpoint_node_id = recorded_id
+        checkpoint_id = self._state.last_checkpoint_node_id
+        if checkpoint_id is not None:
+            # 客户端等系统依赖不落盘，恢复后重建内存回滚点。
+            self._graph.nodes[checkpoint_id].run(self._ctx)
+        if node_id is None:
+            self._last_result = NodeResult(status=NodeStatus.SUCCESS, summary="已恢复阶段末尾产物")
+            return
+        self._step()
+
     def resume_after_human(self, response: HumanResponse) -> None:
         """人工响应后继续执行。"""
         if self._state.pending_human_node_id is None:
@@ -211,11 +235,22 @@ class GraphRunner:
             # 必须接着 _step 循环跑完剩余节点，否则人工节点后的图会被截断）
             self._step()
         elif result.status == NodeStatus.FAILED:
+            self._record_result(node, result)
+            if response.action == "abort":
+                self._state.aborted = True
+                self._state.current_node_id = None
+                return
             self._state.failed_nodes.add(node.node_id)
             self._handle_failure(node, result)
+        elif result.status == NodeStatus.PENDING_HUMAN:
+            # 审核意见导致重写后，仍须用户再次确认，不能把未批准的版本当作完成。
+            self._state.pending_human_node_id = node.node_id
+            self._record_result(node, result)
         elif result.status == NodeStatus.BLOCKED:
             # 用户请求回滚
             self._rollback_to_checkpoint()
+            if not self.is_aborted():
+                self._step()
 
     def abort(self) -> None:
         """中止执行。"""
@@ -314,20 +349,7 @@ class GraphRunner:
                 self._state.current_node_id = next_nodes[0]
 
     def _handle_failure(self, node: Node, result: NodeResult) -> None:
-        """处理节点失败。尝试回退到最近的检查点，否则停止。"""
-        if self._state.last_checkpoint_node_id is not None:
-            # 从 context 取检查点快照（由 CheckpointNode 写入）
-            from core.orchestration.context import ContextKey
-
-            snapshot = self._ctx.get(
-                ContextKey[dict](f"checkpoint.{self._state.last_checkpoint_node_id}")
-            )
-            if snapshot is not None:
-                self._ctx.restore(snapshot)
-                self._state.current_node_id = self._state.last_checkpoint_node_id
-                self._state.failed_nodes.clear()
-                return
-        # 无检查点，停止
+        """保留失败节点及已完成材料，等待用户重试；回滚只由显式操作触发。"""
         self._state.current_node_id = None
 
     def _rollback_to_checkpoint(self) -> None:

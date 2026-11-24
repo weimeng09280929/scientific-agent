@@ -166,6 +166,24 @@ def test_structured_output_raises_on_unknown_task(
 # ===== embed =====
 
 
+@pytest.mark.parametrize("messages_mode", [False, True])
+def test_structured_output_honors_task_budget_even_on_retry(messages_mode):
+    from core.llm.task_router import TaskConfig, EmbeddingConfig
+    received = []
+    class Capture(_MockLLMProvider):
+        def structured_output(self, request, model):
+            received.append(request.max_tokens)
+            if len(received) == 1:
+                raise LLMError("结构化输出返回非合法 JSON")
+            return request.output_schema.model_construct(**{})
+    task = TaskConfig(task_type="long_write", provider="mock", model="test", max_tokens=8192)
+    router = TaskRouter({"long_write":task}, EmbeddingConfig(provider="mock",model="test"))
+    registry = LLMRegistry(router, {"mock":Capture()})
+    arguments = {"messages":[{"role":"user","content":"仅测试预算传递"}]} if messages_mode else {"prompt":"仅测试预算传递"}
+    registry.structured_output("long_write", _FakeSchema, **arguments)
+    assert received == [8192,8192]
+
+
 def test_embed_returns_embedding_response(mock_llm_registry: LLMRegistry):
     """embed 应返回 EmbeddingResponse，向量维度对齐 mock 配置。"""
     resp = mock_llm_registry.embed(["text1", "text2"])
